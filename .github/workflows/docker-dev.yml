@@ -75,4 +75,4 @@ jobs:
             AG_TAR_FILE=agensgraph.tar.gz
           tags: |
             ${{ env.DOCKERHUB_USERNAME }}/agensgraph:${{ env.DOCKER_TAG }}
-            ghcr.io/BitnineGlobal/agensgraph:${{ env.DOCKER_TAG }}
+            ghcr.io/MuhammadTahaNaveed/agensgraph:${{ env.DOCKER_TAG }}

@@ -39,7 +39,7 @@ jobs:
                  --header="Authorization: Bearer ${{ env.GH_API_TOKEN }}" \
                  --header="X-GitHub-Api-Version: 2022-11-28" \
                  -O dockerfiles/agensgraph.tar.gz \
-                 "https://api.github.com/repos/muhammadtahanaveed/agensgraph/tarball/${{ env.branch_name }}";
+                 "https://api.github.com/repos/MuhammadTahaNaveed/agensgraph/tarball/${{ env.branch_name }}";
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -75,4 +75,4 @@ jobs:
             AG_TAR_FILE=agensgraph.tar.gz
           tags: |
             ${{ env.DOCKERHUB_USERNAME }}/agensgraph:${{ env.DOCKER_TAG }}
-            ghcr.io/MuhammadTahaNaveed/agensgraph:${{ env.DOCKER_TAG }}
+            ghcr.io/muhammadtahanaveed/agensgraph:${{ env.DOCKER_TAG }}

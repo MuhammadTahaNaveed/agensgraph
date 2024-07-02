@@ -2,9 +2,7 @@ name: Build and Push Dev Docker Images
 
 on:
   push:
-    branches:
-      - v2.13
-      - v2.14
+    branches: ['*']
 
 jobs:
   build-and-push:

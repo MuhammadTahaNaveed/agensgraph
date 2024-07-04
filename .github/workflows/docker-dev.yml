@@ -67,7 +67,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          platforms: linux/amd64
+          platforms: linux/amd64, linux/arm64
           context: dockerfiles
           push: true
           file: dockerfiles/${{ matrix.distro }}/Dockerfile

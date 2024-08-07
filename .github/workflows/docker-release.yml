@@ -1,9 +1,9 @@
 name: Build and Push Release Docker Images
 
 on:
-  release:
-    types:
-    - published
+  pull_request:
+    branches:
+      - v2.14
 
 jobs:
   build-and-push:
@@ -32,10 +32,9 @@ jobs:
       - name: Pull the tarball
         run: |
             wget --header="Accept: application/vnd.github+json" \
-                 --header="Authorization: Bearer ${{ env.GH_API_TOKEN }}" \
                  --header="X-GitHub-Api-Version: 2022-11-28" \
                  -O dockerfiles/agensgraph.tar.gz \
-                 "https://api.github.com/repos/BitnineGlobal/agensgraph/tarball/${{ github.event.release.tag_name }}"; \
+                 "https://api.github.com/repos/BitnineGlobal/agensgraph/tarball/v2.14.1"; \
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -50,7 +49,7 @@ jobs:
 
       - name: Set Docker tag
         id: docker-tag
-        run: echo "DOCKER_TAG=${{ github.event.release.tag_name }}-${{ matrix.distro }}" >> $GITHUB_ENV
+        run: echo "DOCKER_TAG=v2.14.1-${{ matrix.distro }}" >> $GITHUB_ENV
 
       - name: Build and push
         uses: docker/build-push-action@v6

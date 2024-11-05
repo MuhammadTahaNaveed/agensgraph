@@ -22,7 +22,7 @@
  * execAmi.c
  *	  miscellaneous executor access method routines
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/executor/execAmi.c
@@ -477,13 +477,10 @@ ExecSupportsMarkRestore(Path *pathnode)
 			return true;
 
 		case T_CustomScan:
-			{
-				CustomPath *customPath = castNode(CustomPath, pathnode);
+			if (castNode(CustomPath, pathnode)->flags & CUSTOMPATH_SUPPORT_MARK_RESTORE)
+				return true;
+			return false;
 
-				if (customPath->flags & CUSTOMPATH_SUPPORT_MARK_RESTORE)
-					return true;
-				return false;
-			}
 		case T_Result:
 
 			/*
@@ -606,12 +603,8 @@ ExecSupportsBackwardScan(Plan *node)
 			return ExecSupportsBackwardScan(((SubqueryScan *) node)->subplan);
 
 		case T_CustomScan:
-			{
-				uint32		flags = ((CustomScan *) node)->flags;
-
-				if (flags & CUSTOMPATH_SUPPORT_BACKWARD_SCAN)
-					return true;
-			}
+			if (((CustomScan *) node)->flags & CUSTOMPATH_SUPPORT_BACKWARD_SCAN)
+				return true;
 			return false;
 
 		case T_SeqScan:

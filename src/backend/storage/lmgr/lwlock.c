@@ -39,7 +39,7 @@
  * appropriate value for a free lock.  The meaning of the variable is up to
  * the caller, the lightweight lock code just assigns and compares it.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -98,6 +98,7 @@
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "pgstat.h"
+#include "port/pg_bitutils.h"
 #include "postmaster/postmaster.h"
 #include "replication/slot.h"
 #include "storage/ipc.h"
@@ -150,7 +151,7 @@ static const char *const BuiltinTrancheNames[] = {
 	/* LWTRANCHE_XACT_BUFFER: */
 	"XactBuffer",
 	/* LWTRANCHE_COMMITTS_BUFFER: */
-	"CommitTSBuffer",
+	"CommitTsBuffer",
 	/* LWTRANCHE_SUBTRANS_BUFFER: */
 	"SubtransBuffer",
 	/* LWTRANCHE_MULTIXACTOFFSET_BUFFER: */
@@ -194,7 +195,13 @@ static const char *const BuiltinTrancheNames[] = {
 	/* LWTRANCHE_PARALLEL_APPEND: */
 	"ParallelAppend",
 	/* LWTRANCHE_PER_XACT_PREDICATE_LIST: */
-	"PerXactPredicateList"
+	"PerXactPredicateList",
+	/* LWTRANCHE_PGSTATS_DSA: */
+	"PgStatsDSA",
+	/* LWTRANCHE_PGSTATS_HASH: */
+	"PgStatsHash",
+	/* LWTRANCHE_PGSTATS_DATA: */
+	"PgStatsData",
 };
 
 StaticAssertDecl(lengthof(BuiltinTrancheNames) ==
@@ -254,8 +261,6 @@ int			NamedLWLockTrancheRequests = 0;
 
 /* points to data in shared memory: */
 NamedLWLockTranche *NamedLWLockTrancheArray = NULL;
-
-static bool lock_named_request_allowed = true;
 
 static void InitializeLWLocks(void);
 static inline void LWLockReportWaitStart(LWLock *lock);
@@ -470,9 +475,6 @@ LWLockShmemSize(void)
 	for (i = 0; i < NamedLWLockTrancheRequests; i++)
 		size = add_size(size, strlen(NamedLWLockTrancheRequestArray[i].tranche_name) + 1);
 
-	/* Disallow adding any more named tranches. */
-	lock_named_request_allowed = false;
-
 	return size;
 }
 
@@ -678,9 +680,7 @@ LWLockRegisterTranche(int tranche_id, const char *tranche_name)
 	{
 		int			newalloc;
 
-		newalloc = Max(LWLockTrancheNamesAllocated, 8);
-		while (newalloc <= tranche_id)
-			newalloc *= 2;
+		newalloc = pg_nextpower2_32(Max(8, tranche_id + 1));
 
 		if (LWLockTrancheNames == NULL)
 			LWLockTrancheNames = (const char **)
@@ -705,12 +705,9 @@ LWLockRegisterTranche(int tranche_id, const char *tranche_name)
  *		Request that extra LWLocks be allocated during postmaster
  *		startup.
  *
- * This is only useful for extensions if called from the _PG_init hook
- * of a library that is loaded into the postmaster via
- * shared_preload_libraries.  Once shared memory has been allocated, calls
- * will be ignored.  (We could raise an error, but it seems better to make
- * it a no-op, so that libraries containing such calls can be reloaded if
- * needed.)
+ * This may only be called via the shmem_request_hook of a library that is
+ * loaded into the postmaster via shared_preload_libraries.  Calls from
+ * elsewhere will fail.
  *
  * The tranche name will be user-visible as a wait event name, so try to
  * use a name that fits the style for those.
@@ -720,8 +717,8 @@ RequestNamedLWLockTranche(const char *tranche_name, int num_lwlocks)
 {
 	NamedLWLockTrancheRequest *request;
 
-	if (IsUnderPostmaster || !lock_named_request_allowed)
-		return;					/* too late */
+	if (!process_shmem_requests_in_progress)
+		elog(FATAL, "cannot request additional LWLocks outside shmem_request_hook");
 
 	if (NamedLWLockTrancheRequestArray == NULL)
 	{
@@ -734,10 +731,7 @@ RequestNamedLWLockTranche(const char *tranche_name, int num_lwlocks)
 
 	if (NamedLWLockTrancheRequests >= NamedLWLockTrancheRequestsAllocated)
 	{
-		int			i = NamedLWLockTrancheRequestsAllocated;
-
-		while (i <= NamedLWLockTrancheRequests)
-			i *= 2;
+		int			i = pg_nextpower2_32(NamedLWLockTrancheRequests + 1);
 
 		NamedLWLockTrancheRequestArray = (NamedLWLockTrancheRequest *)
 			repalloc(NamedLWLockTrancheRequestArray,
@@ -1013,6 +1007,15 @@ LWLockWakeup(LWLock *lock)
 		}
 
 		/*
+		 * Signal that the process isn't on the wait list anymore. This allows
+		 * LWLockDequeueSelf() to remove itself of the waitlist with a
+		 * proclist_delete(), rather than having to check if it has been
+		 * removed from the list.
+		 */
+		Assert(waiter->lwWaiting == LW_WS_WAITING);
+		waiter->lwWaiting = LW_WS_PENDING_WAKEUP;
+
+		/*
 		 * Once we've woken up an exclusive lock, there's no point in waking
 		 * up anybody else.
 		 */
@@ -1069,7 +1072,7 @@ LWLockWakeup(LWLock *lock)
 		 * another lock.
 		 */
 		pg_write_barrier();
-		waiter->lwWaiting = false;
+		waiter->lwWaiting = LW_WS_NOT_WAITING;
 		PGSemaphoreUnlock(waiter->sem);
 	}
 }
@@ -1090,7 +1093,7 @@ LWLockQueueSelf(LWLock *lock, LWLockMode mode)
 	if (MyProc == NULL)
 		elog(PANIC, "cannot wait without a PGPROC structure");
 
-	if (MyProc->lwWaiting)
+	if (MyProc->lwWaiting != LW_WS_NOT_WAITING)
 		elog(PANIC, "queueing for lock while waiting on another one");
 
 	LWLockWaitListLock(lock);
@@ -1098,7 +1101,7 @@ LWLockQueueSelf(LWLock *lock, LWLockMode mode)
 	/* setting the flag is protected by the spinlock */
 	pg_atomic_fetch_or_u32(&lock->state, LW_FLAG_HAS_WAITERS);
 
-	MyProc->lwWaiting = true;
+	MyProc->lwWaiting = LW_WS_WAITING;
 	MyProc->lwWaitMode = mode;
 
 	/* LW_WAIT_UNTIL_FREE waiters are always at the front of the queue */
@@ -1113,7 +1116,6 @@ LWLockQueueSelf(LWLock *lock, LWLockMode mode)
 #ifdef LOCK_DEBUG
 	pg_atomic_fetch_add_u32(&lock->nwaiters, 1);
 #endif
-
 }
 
 /*
@@ -1126,8 +1128,7 @@ LWLockQueueSelf(LWLock *lock, LWLockMode mode)
 static void
 LWLockDequeueSelf(LWLock *lock)
 {
-	bool		found = false;
-	proclist_mutable_iter iter;
+	bool		on_waitlist;
 
 #ifdef LWLOCK_STATS
 	lwlock_stats *lwstats;
@@ -1140,18 +1141,13 @@ LWLockDequeueSelf(LWLock *lock)
 	LWLockWaitListLock(lock);
 
 	/*
-	 * Can't just remove ourselves from the list, but we need to iterate over
-	 * all entries as somebody else could have dequeued us.
+	 * Remove ourselves from the waitlist, unless we've already been
+	 * removed. The removal happens with the wait list lock held, so there's
+	 * no race in this check.
 	 */
-	proclist_foreach_modify(iter, &lock->waiters, lwWaitLink)
-	{
-		if (iter.cur == MyProc->pgprocno)
-		{
-			found = true;
-			proclist_delete(&lock->waiters, iter.cur, lwWaitLink);
-			break;
-		}
-	}
+	on_waitlist = MyProc->lwWaiting == LW_WS_WAITING;
+	if (on_waitlist)
+		proclist_delete(&lock->waiters, MyProc->pgprocno, lwWaitLink);
 
 	if (proclist_is_empty(&lock->waiters) &&
 		(pg_atomic_read_u32(&lock->state) & LW_FLAG_HAS_WAITERS) != 0)
@@ -1163,8 +1159,8 @@ LWLockDequeueSelf(LWLock *lock)
 	LWLockWaitListUnlock(lock);
 
 	/* clear waiting state again, nice for debugging */
-	if (found)
-		MyProc->lwWaiting = false;
+	if (on_waitlist)
+		MyProc->lwWaiting = LW_WS_NOT_WAITING;
 	else
 	{
 		int			extraWaits = 0;
@@ -1188,7 +1184,7 @@ LWLockDequeueSelf(LWLock *lock)
 		for (;;)
 		{
 			PGSemaphoreLock(MyProc->sem);
-			if (!MyProc->lwWaiting)
+			if (MyProc->lwWaiting == LW_WS_NOT_WAITING)
 				break;
 			extraWaits++;
 		}
@@ -1339,7 +1335,7 @@ LWLockAcquire(LWLock *lock, LWLockMode mode)
 		for (;;)
 		{
 			PGSemaphoreLock(proc->sem);
-			if (!proc->lwWaiting)
+			if (proc->lwWaiting == LW_WS_NOT_WAITING)
 				break;
 			extraWaits++;
 		}
@@ -1504,7 +1500,7 @@ LWLockAcquireOrWait(LWLock *lock, LWLockMode mode)
 			for (;;)
 			{
 				PGSemaphoreLock(proc->sem);
-				if (!proc->lwWaiting)
+				if (proc->lwWaiting == LW_WS_NOT_WAITING)
 					break;
 				extraWaits++;
 			}
@@ -1720,7 +1716,7 @@ LWLockWaitForVar(LWLock *lock, uint64 *valptr, uint64 oldval, uint64 *newval)
 		for (;;)
 		{
 			PGSemaphoreLock(proc->sem);
-			if (!proc->lwWaiting)
+			if (proc->lwWaiting == LW_WS_NOT_WAITING)
 				break;
 			extraWaits++;
 		}
@@ -1798,6 +1794,10 @@ LWLockUpdateVar(LWLock *lock, uint64 *valptr, uint64 val)
 
 		proclist_delete(&lock->waiters, iter.cur, lwWaitLink);
 		proclist_push_tail(&wakeup, iter.cur, lwWaitLink);
+
+		/* see LWLockWakeup() */
+		Assert(waiter->lwWaiting == LW_WS_WAITING);
+		waiter->lwWaiting = LW_WS_PENDING_WAKEUP;
 	}
 
 	/* We are done updating shared state of the lock itself. */
@@ -1813,7 +1813,7 @@ LWLockUpdateVar(LWLock *lock, uint64 *valptr, uint64 val)
 		proclist_delete(&wakeup, iter.cur, lwWaitLink);
 		/* check comment in LWLockWakeup() about this barrier */
 		pg_write_barrier();
-		waiter->lwWaiting = false;
+		waiter->lwWaiting = LW_WS_NOT_WAITING;
 		PGSemaphoreUnlock(waiter->sem);
 	}
 }

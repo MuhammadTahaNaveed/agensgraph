@@ -456,9 +456,7 @@ for storing <acronym>TOAST</acronym>-able columns on disk:
     <listitem>
      <para>
       <literal>PLAIN</literal> prevents either compression or
-      out-of-line storage; furthermore it disables use of single-byte headers
-      for varlena types.
-      This is the only possible strategy for
+      out-of-line storage.  This is the only possible strategy for
       columns of non-<acronym>TOAST</acronym>-able data types.
      </para>
     </listitem>
@@ -603,10 +601,11 @@ tuple would otherwise be too big.
 
 <para>
 Each heap and index relation, except for hash indexes, has a Free Space Map
-(FSM) to keep track of available space in the relation. It's stored
-alongside the main relation data in a separate relation fork, named after the
-filenode number of the relation, plus a <literal>_fsm</literal> suffix. For example,
-if the filenode of a relation is 12345, the FSM is stored in a file called
+(<acronym>FSM</acronym>) to keep track of available space in the relation.
+It's stored alongside the main relation data in a separate relation fork,
+named after the filenode number of the relation, plus a <literal>_fsm</literal>
+suffix. For example, if the filenode of a relation is 12345, the
+<acronym>FSM</acronym> is stored in a file called
 <filename>12345_fsm</filename>, in the same directory as the main relation file.
 </para>
 
@@ -1135,7 +1134,7 @@ data. Empty in ordinary tables.</entry>
   if columns used by indexes are not updated.  You can
   increase the likelihood of sufficient page space for
   <acronym>HOT</acronym> updates by decreasing a table's <link
-  linkend="sql-createtable"><literal>fillfactor</literal></link>.
+  linkend="reloption-fillfactor"><literal>fillfactor</literal></link>.
   If you don't, <acronym>HOT</acronym> updates will still happen because
   new rows will naturally migrate to new pages and existing pages with
   sufficient free space for new row versions.  The system view <link

@@ -242,6 +242,21 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--config-file=<replaceable class="parameter">filename</replaceable></option></term>
+      <listitem>
+       <para>
+        Use the specified main server configuration file for the target
+        cluster. This affects <application>pg_rewind</application> when
+        it uses internally the <application>postgres</application> command
+        for the rewind operation on this cluster (when retrieving
+        <varname>restore_command</varname> with the option
+        <option>-c/--restore-target-wal</option> and when forcing a
+        completion of crash recovery).
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--debug</option></term>
       <listitem>
        <para>
@@ -374,8 +389,9 @@ GRANT EXECUTE ON function pg_catalog.pg_read_binary_file(text, bigint, bigint, b
       <filename>backup_label</filename>,
       <filename>tablespace_map</filename>,
       <filename>pg_internal.init</filename>,
-      <filename>postmaster.opts</filename>, and
-      <filename>postmaster.pid</filename>, as well as any file or directory
+      <filename>postmaster.opts</filename>,
+      <filename>postmaster.pid</filename> and
+      <filename>.DS_Store</filename> as well as any file or directory
       beginning with <filename>pgsql_tmp</filename>, are omitted.
      </para>
     </step>

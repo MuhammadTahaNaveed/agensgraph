@@ -22,7 +22,7 @@
  * nodeTableFuncscan.c
  *	  Support routines for scanning RangeTableFunc (XMLTABLE like functions).
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -33,11 +33,11 @@
  */
 /*
  * INTERFACE ROUTINES
- *		ExecTableFuncscan		scans a function.
+ *		ExecTableFuncScan		scans a function.
  *		ExecFunctionNext		retrieve next tuple in sequential order.
- *		ExecInitTableFuncscan	creates and initializes a TableFuncscan node.
- *		ExecEndTableFuncscan		releases any storage allocated.
- *		ExecReScanTableFuncscan rescans the function
+ *		ExecInitTableFuncScan	creates and initializes a TableFuncscan node.
+ *		ExecEndTableFuncScan		releases any storage allocated.
+ *		ExecReScanTableFuncScan rescans the function
  */
 #include "postgres.h"
 
@@ -65,7 +65,7 @@ static void tfuncLoadRows(TableFuncScanState *tstate, ExprContext *econtext);
 /* ----------------------------------------------------------------
  *		TableFuncNext
  *
- *		This is a workhorse for ExecTableFuncscan
+ *		This is a workhorse for ExecTableFuncScan
  * ----------------------------------------------------------------
  */
 static TupleTableSlot *
@@ -103,7 +103,7 @@ TableFuncRecheck(TableFuncScanState *node, TupleTableSlot *slot)
 }
 
 /* ----------------------------------------------------------------
- *		ExecTableFuncscan(node)
+ *		ExecTableFuncScan(node)
  *
  *		Scans the function sequentially and returns the next qualifying
  *		tuple.
@@ -122,7 +122,7 @@ ExecTableFuncScan(PlanState *pstate)
 }
 
 /* ----------------------------------------------------------------
- *		ExecInitTableFuncscan
+ *		ExecInitTableFuncScan
  * ----------------------------------------------------------------
  */
 TableFuncScanState *
@@ -224,7 +224,7 @@ ExecInitTableFuncScan(TableFuncScan *node, EState *estate, int eflags)
 }
 
 /* ----------------------------------------------------------------
- *		ExecEndTableFuncscan
+ *		ExecEndTableFuncScan
  *
  *		frees any storage allocated through C routines.
  * ----------------------------------------------------------------
@@ -253,7 +253,7 @@ ExecEndTableFuncScan(TableFuncScanState *node)
 }
 
 /* ----------------------------------------------------------------
- *		ExecReScanTableFuncscan
+ *		ExecReScanTableFuncScan
  *
  *		Rescans the relation.
  * ----------------------------------------------------------------
@@ -383,7 +383,7 @@ tfuncInitialize(TableFuncScanState *tstate, ExprContext *econtext, Datum doc)
 	forboth(lc1, tstate->ns_uris, lc2, tstate->ns_names)
 	{
 		ExprState  *expr = (ExprState *) lfirst(lc1);
-		Value	   *ns_node = (Value *) lfirst(lc2);
+		String	   *ns_node = lfirst_node(String, lc2);
 		char	   *ns_uri;
 		char	   *ns_name;
 

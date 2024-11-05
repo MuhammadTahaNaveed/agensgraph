@@ -2,7 +2,7 @@
  * hashfuncs.c
  *		Functions to investigate the content of HASH indexes
  *
- * Copyright (c) 2017-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2017-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		contrib/pageinspect/hashfuncs.c
@@ -12,6 +12,7 @@
 
 #include "access/hash.h"
 #include "access/htup_details.h"
+#include "access/relation.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
@@ -27,6 +28,7 @@ PG_FUNCTION_INFO_V1(hash_page_items);
 PG_FUNCTION_INFO_V1(hash_bitmap_info);
 PG_FUNCTION_INFO_V1(hash_metapage_info);
 
+#define IS_INDEX(r) ((r)->rd_rel->relkind == RELKIND_INDEX)
 #define IS_HASH(r) ((r)->rd_rel->relam == HASH_AM_OID)
 
 /* ------------------------------------------------
@@ -72,7 +74,7 @@ verify_hash_page(bytea *raw_page, int flags)
 							   (int) MAXALIGN(sizeof(HashPageOpaqueData)),
 							   (int) PageGetSpecialSize(page))));
 
-		pageopaque = (HashPageOpaque) PageGetSpecialPointer(page);
+		pageopaque = HashPageGetOpaque(page);
 		if (pageopaque->hasho_page_id != HASHO_PAGE_ID)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -154,7 +156,7 @@ static void
 GetHashPageStatistics(Page page, HashPageStat *stat)
 {
 	OffsetNumber maxoff = PageGetMaxOffsetNumber(page);
-	HashPageOpaque opaque = (HashPageOpaque) PageGetSpecialPointer(page);
+	HashPageOpaque opaque = HashPageGetOpaque(page);
 	int			off;
 
 	stat->dead_items = stat->live_items = 0;
@@ -206,7 +208,7 @@ hash_page_type(PG_FUNCTION_ARGS)
 		type = "unused";
 	else
 	{
-		opaque = (HashPageOpaque) PageGetSpecialPointer(page);
+		opaque = HashPageGetOpaque(page);
 
 		/* page type (flags) */
 		pagetype = opaque->hasho_flag & LH_PAGE_TYPE;
@@ -417,9 +419,9 @@ hash_bitmap_info(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser to use raw page functions")));
 
-	indexRel = index_open(indexRelid, AccessShareLock);
+	indexRel = relation_open(indexRelid, AccessShareLock);
 
-	if (!IS_HASH(indexRel))
+	if (!IS_INDEX(indexRel) || !IS_HASH(indexRel))
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is not a %s index",

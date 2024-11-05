@@ -23,7 +23,7 @@
  *	  Routines to multiplex SIGALRM interrupts for multiple timeout reasons.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/timeout.h
@@ -51,7 +51,9 @@ typedef enum TimeoutId
 	STANDBY_LOCK_TIMEOUT,
 	IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
 	IDLE_SESSION_TIMEOUT,
+	IDLE_STATS_UPDATE_TIMEOUT,
 	CLIENT_CONNECTION_CHECK_TIMEOUT,
+	STARTUP_PROGRESS_TIMEOUT,
 	/* First user-definable timeout reason */
 	USER_TIMEOUT,
 	/* Maximum number of timeout reasons */
@@ -67,14 +69,15 @@ typedef void (*timeout_handler_proc) (void);
 typedef enum TimeoutType
 {
 	TMPARAM_AFTER,
-	TMPARAM_AT
+	TMPARAM_AT,
+	TMPARAM_EVERY
 } TimeoutType;
 
 typedef struct
 {
 	TimeoutId	id;				/* timeout to set */
 	TimeoutType type;			/* TMPARAM_AFTER or TMPARAM_AT */
-	int			delay_ms;		/* only used for TMPARAM_AFTER */
+	int			delay_ms;		/* only used for TMPARAM_AFTER/EVERY */
 	TimestampTz fin_time;		/* only used for TMPARAM_AT */
 } EnableTimeoutParams;
 
@@ -94,6 +97,8 @@ extern void reschedule_timeouts(void);
 
 /* timeout operation */
 extern void enable_timeout_after(TimeoutId id, int delay_ms);
+extern void enable_timeout_every(TimeoutId id, TimestampTz fin_time,
+								 int delay_ms);
 extern void enable_timeout_at(TimeoutId id, TimestampTz fin_time);
 extern void enable_timeouts(const EnableTimeoutParams *timeouts, int count);
 extern void disable_timeout(TimeoutId id, bool keep_indicator);

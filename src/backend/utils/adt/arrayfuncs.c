@@ -22,7 +22,7 @@
  * arrayfuncs.c
  *	  Support functions for arrays.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -38,6 +38,7 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_type.h"
+#include "common/int.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "nodes/nodeFuncs.h"
@@ -2353,22 +2354,38 @@ array_set_element(Datum arraydatum,
 	addedbefore = addedafter = 0;
 
 	/*
-	 * Check subscripts
+	 * Check subscripts.  We assume the existing subscripts passed
+	 * ArrayCheckBounds, so that dim[i] + lb[i] can be computed without
+	 * overflow.  But we must beware of other overflows in our calculations of
+	 * new dim[] values.
 	 */
 	if (ndim == 1)
 	{
 		if (indx[0] < lb[0])
 		{
-			addedbefore = lb[0] - indx[0];
-			dim[0] += addedbefore;
+			/* addedbefore = lb[0] - indx[0]; */
+			/* dim[0] += addedbefore; */
+			if (pg_sub_s32_overflow(lb[0], indx[0], &addedbefore) ||
+				pg_add_s32_overflow(dim[0], addedbefore, &dim[0]))
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("array size exceeds the maximum allowed (%d)",
+								(int) MaxArraySize)));
 			lb[0] = indx[0];
 			if (addedbefore > 1)
 				newhasnulls = true; /* will insert nulls */
 		}
 		if (indx[0] >= (dim[0] + lb[0]))
 		{
-			addedafter = indx[0] - (dim[0] + lb[0]) + 1;
-			dim[0] += addedafter;
+			/* addedafter = indx[0] - (dim[0] + lb[0]) + 1; */
+			/* dim[0] += addedafter; */
+			if (pg_sub_s32_overflow(indx[0], dim[0] + lb[0], &addedafter) ||
+				pg_add_s32_overflow(addedafter, 1, &addedafter) ||
+				pg_add_s32_overflow(dim[0], addedafter, &dim[0]))
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("array size exceeds the maximum allowed (%d)",
+								(int) MaxArraySize)));
 			if (addedafter > 1)
 				newhasnulls = true; /* will insert nulls */
 		}
@@ -2478,8 +2495,7 @@ array_set_element(Datum arraydatum,
 	{
 		bits8	   *newnullbitmap = ARR_NULLBITMAP(newarray);
 
-		/* Zero the bitmap to take care of marking inserted positions null */
-		MemSet(newnullbitmap, 0, (newnitems + 7) / 8);
+		/* palloc0 above already marked any inserted positions as nulls */
 		/* Fix the inserted value */
 		if (addedafter)
 			array_set_isnull(newnullbitmap, newnitems - 1, isNull);
@@ -2615,14 +2631,23 @@ array_set_element_expanded(Datum arraydatum,
 	addedbefore = addedafter = 0;
 
 	/*
-	 * Check subscripts (this logic matches original array_set_element)
+	 * Check subscripts (this logic must match array_set_element).  We assume
+	 * the existing subscripts passed ArrayCheckBounds, so that dim[i] + lb[i]
+	 * can be computed without overflow.  But we must beware of other
+	 * overflows in our calculations of new dim[] values.
 	 */
 	if (ndim == 1)
 	{
 		if (indx[0] < lb[0])
 		{
-			addedbefore = lb[0] - indx[0];
-			dim[0] += addedbefore;
+			/* addedbefore = lb[0] - indx[0]; */
+			/* dim[0] += addedbefore; */
+			if (pg_sub_s32_overflow(lb[0], indx[0], &addedbefore) ||
+				pg_add_s32_overflow(dim[0], addedbefore, &dim[0]))
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("array size exceeds the maximum allowed (%d)",
+								(int) MaxArraySize)));
 			lb[0] = indx[0];
 			dimschanged = true;
 			if (addedbefore > 1)
@@ -2630,8 +2655,15 @@ array_set_element_expanded(Datum arraydatum,
 		}
 		if (indx[0] >= (dim[0] + lb[0]))
 		{
-			addedafter = indx[0] - (dim[0] + lb[0]) + 1;
-			dim[0] += addedafter;
+			/* addedafter = indx[0] - (dim[0] + lb[0]) + 1; */
+			/* dim[0] += addedafter; */
+			if (pg_sub_s32_overflow(indx[0], dim[0] + lb[0], &addedafter) ||
+				pg_add_s32_overflow(addedafter, 1, &addedafter) ||
+				pg_add_s32_overflow(dim[0], addedafter, &dim[0]))
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("array size exceeds the maximum allowed (%d)",
+								(int) MaxArraySize)));
 			dimschanged = true;
 			if (addedafter > 1)
 				newhasnulls = true; /* will insert nulls */
@@ -2886,7 +2918,14 @@ array_set_slice(Datum arraydatum,
 						 errdetail("When assigning to a slice of an empty array value,"
 								   " slice boundaries must be fully specified.")));
 
-			dim[i] = 1 + upperIndx[i] - lowerIndx[i];
+			/* compute "upperIndx[i] - lowerIndx[i] + 1", detecting overflow */
+			if (pg_sub_s32_overflow(upperIndx[i], lowerIndx[i], &dim[i]) ||
+				pg_add_s32_overflow(dim[i], 1, &dim[i]))
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("array size exceeds the maximum allowed (%d)",
+								(int) MaxArraySize)));
+
 			lb[i] = lowerIndx[i];
 		}
 
@@ -2914,7 +2953,10 @@ array_set_slice(Datum arraydatum,
 	addedbefore = addedafter = 0;
 
 	/*
-	 * Check subscripts
+	 * Check subscripts.  We assume the existing subscripts passed
+	 * ArrayCheckBounds, so that dim[i] + lb[i] can be computed without
+	 * overflow.  But we must beware of other overflows in our calculations of
+	 * new dim[] values.
 	 */
 	if (ndim == 1)
 	{
@@ -2929,18 +2971,31 @@ array_set_slice(Datum arraydatum,
 					 errmsg("upper bound cannot be less than lower bound")));
 		if (lowerIndx[0] < lb[0])
 		{
-			if (upperIndx[0] < lb[0] - 1)
-				newhasnulls = true; /* will insert nulls */
-			addedbefore = lb[0] - lowerIndx[0];
-			dim[0] += addedbefore;
+			/* addedbefore = lb[0] - lowerIndx[0]; */
+			/* dim[0] += addedbefore; */
+			if (pg_sub_s32_overflow(lb[0], lowerIndx[0], &addedbefore) ||
+				pg_add_s32_overflow(dim[0], addedbefore, &dim[0]))
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("array size exceeds the maximum allowed (%d)",
+								(int) MaxArraySize)));
 			lb[0] = lowerIndx[0];
+			if (addedbefore > 1)
+				newhasnulls = true; /* will insert nulls */
 		}
 		if (upperIndx[0] >= (dim[0] + lb[0]))
 		{
-			if (lowerIndx[0] > (dim[0] + lb[0]))
+			/* addedafter = upperIndx[0] - (dim[0] + lb[0]) + 1; */
+			/* dim[0] += addedafter; */
+			if (pg_sub_s32_overflow(upperIndx[0], dim[0] + lb[0], &addedafter) ||
+				pg_add_s32_overflow(addedafter, 1, &addedafter) ||
+				pg_add_s32_overflow(dim[0], addedafter, &dim[0]))
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("array size exceeds the maximum allowed (%d)",
+								(int) MaxArraySize)));
+			if (addedafter > 1)
 				newhasnulls = true; /* will insert nulls */
-			addedafter = upperIndx[0] - (dim[0] + lb[0]) + 1;
-			dim[0] += addedafter;
 		}
 	}
 	else
@@ -3095,8 +3150,7 @@ array_set_slice(Datum arraydatum,
 			bits8	   *newnullbitmap = ARR_NULLBITMAP(newarray);
 			bits8	   *oldnullbitmap = ARR_NULLBITMAP(array);
 
-			/* Zero the bitmap to handle marking inserted positions null */
-			MemSet(newnullbitmap, 0, (nitems + 7) / 8);
+			/* palloc0 above already marked any inserted positions as nulls */
 			array_bitmap_copy(newnullbitmap, addedbefore,
 							  oldnullbitmap, 0,
 							  itemsbefore);
@@ -4015,7 +4069,8 @@ hash_array(PG_FUNCTION_ARGS)
 
 			/*
 			 * Make fake type cache entry structure.  Note that we can't just
-			 * modify typentry, since that points directly into the type cache.
+			 * modify typentry, since that points directly into the type
+			 * cache.
 			 */
 			record_typentry = palloc0(sizeof(*record_typentry));
 			record_typentry->type_id = element_type;

@@ -22,7 +22,7 @@
  * heapam_handler.c
  *	  heap table access method code
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -207,7 +207,7 @@ heapam_fetch_row_version(Relation relation,
 	Assert(TTS_IS_BUFFERTUPLE(slot));
 
 	bslot->base.tupdata.t_self = *tid;
-	if (heap_fetch(relation, snapshot, &bslot->base.tupdata, &buffer))
+	if (heap_fetch(relation, snapshot, &bslot->base.tupdata, &buffer, false))
 	{
 		/* store in slot, transferring existing pin */
 		ExecStorePinnedBufferHeapTuple(&bslot->base.tupdata, slot, buffer);
@@ -420,8 +420,7 @@ tuple_lock_retry:
 							 errmsg("tuple to be locked was already moved to another partition due to concurrent update")));
 
 				tuple->t_self = *tid;
-				if (heap_fetch_extended(relation, &SnapshotDirty, tuple,
-										&buffer, true))
+				if (heap_fetch(relation, &SnapshotDirty, tuple, &buffer, true))
 				{
 					/*
 					 * If xmin isn't what we're expecting, the slot must have
@@ -611,7 +610,7 @@ heapam_relation_set_new_filenode(Relation rel,
 	 */
 	*minmulti = GetOldestMultiXactId();
 
-	srel = RelationCreateStorage(*newrnode, persistence);
+	srel = RelationCreateStorage(*newrnode, persistence, true);
 
 	/*
 	 * If required, set up an init fork for an unlogged table so that it can
@@ -619,7 +618,7 @@ heapam_relation_set_new_filenode(Relation rel,
 	 * even if the page has been logged, because the write did not go through
 	 * shared_buffers and therefore a concurrent checkpoint may have moved the
 	 * redo pointer past our xlog record.  Recovery may as well remove it
-	 * while replaying, for example, XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE
+	 * while replaying, for example, XLOG_DBASE_CREATE* or XLOG_TBLSPC_CREATE
 	 * record. Therefore, logging is necessary even if wal_level=minimal.
 	 */
 	if (persistence == RELPERSISTENCE_UNLOGGED)
@@ -647,7 +646,6 @@ heapam_relation_copy_data(Relation rel, const RelFileNode *newrnode)
 	SMgrRelation dstrel;
 
 	dstrel = smgropen(*newrnode, rel->rd_backend);
-	RelationOpenSmgr(rel);
 
 	/*
 	 * Since we copy the file directly without looking at the shared buffers,
@@ -664,17 +662,17 @@ heapam_relation_copy_data(Relation rel, const RelFileNode *newrnode)
 	 * NOTE: any conflict in relfilenode value will be caught in
 	 * RelationCreateStorage().
 	 */
-	RelationCreateStorage(*newrnode, rel->rd_rel->relpersistence);
+	RelationCreateStorage(*newrnode, rel->rd_rel->relpersistence, true);
 
 	/* copy main fork */
-	RelationCopyStorage(rel->rd_smgr, dstrel, MAIN_FORKNUM,
+	RelationCopyStorage(RelationGetSmgr(rel), dstrel, MAIN_FORKNUM,
 						rel->rd_rel->relpersistence);
 
 	/* copy those extra forks that exist */
 	for (ForkNumber forkNum = MAIN_FORKNUM + 1;
 		 forkNum <= MAX_FORKNUM; forkNum++)
 	{
-		if (smgrexists(rel->rd_smgr, forkNum))
+		if (smgrexists(RelationGetSmgr(rel), forkNum))
 		{
 			smgrcreate(dstrel, forkNum, false);
 
@@ -686,7 +684,7 @@ heapam_relation_copy_data(Relation rel, const RelFileNode *newrnode)
 				(rel->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED &&
 				 forkNum == INIT_FORKNUM))
 				log_smgrcreate(newrnode, forkNum);
-			RelationCopyStorage(rel->rd_smgr, dstrel, forkNum,
+			RelationCopyStorage(RelationGetSmgr(rel), dstrel, forkNum,
 								rel->rd_rel->relpersistence);
 		}
 	}
@@ -745,7 +743,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	if (use_sort)
 		tuplesort = tuplesort_begin_cluster(oldTupDesc, OldIndex,
 											maintenance_work_mem,
-											NULL, false);
+											NULL, TUPLESORT_NONE);
 	else
 		tuplesort = NULL;
 
@@ -1108,8 +1106,8 @@ heapam_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 				 * our own.  In this case we should count and sample the row,
 				 * to accommodate users who load a table and analyze it in one
 				 * transaction.  (pgstat_report_analyze has to adjust the
-				 * numbers we send to the stats collector to make this come
-				 * out right.)
+				 * numbers we report to the cumulative stats system to make
+				 * this come out right.)
 				 */
 				if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(targtuple->t_data)))
 				{
@@ -2146,9 +2144,11 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
 	 * Ignore any claimed entries past what we think is the end of the
 	 * relation. It may have been extended after the start of our scan (we
 	 * only hold an AccessShareLock, and it could be inserts from this
-	 * backend).
+	 * backend).  We don't take this optimization in SERIALIZABLE isolation
+	 * though, as we need to examine all invisible tuples reachable by the
+	 * index.
 	 */
-	if (page >= hscan->rs_nblocks)
+	if (!IsolationIsSerializable() && page >= hscan->rs_nblocks)
 		return false;
 
 	/*

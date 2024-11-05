@@ -22,7 +22,7 @@
  * tsquery.c
  *	  I/O functions for tsquery
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -280,7 +280,7 @@ parse_or_operator(TSQueryParserState pstate)
 		/*
 		 * Suppose, we found an operand, but could be a not correct operand.
 		 * So we still treat OR literal as operation with possibly incorrect
-		 * operand and  will not search it as lexeme
+		 * operand and will not search it as lexeme
 		 */
 		if (!t_isspace(ptr))
 			break;
@@ -439,7 +439,7 @@ gettoken_query_websearch(TSQueryParserState state, int8 *operator,
 				}
 				else if (ISOPERATOR(state->buf))
 				{
-					/* or else gettoken_tsvector() will raise an error */
+					/* ignore, else gettoken_tsvector() will raise an error */
 					state->buf++;
 					state->state = WAITOPERAND;
 					continue;
@@ -471,15 +471,9 @@ gettoken_query_websearch(TSQueryParserState state, int8 *operator,
 				break;
 
 			case WAITOPERATOR:
-				if (t_iseq(state->buf, '"'))
+				if (*state->buf == '\0')
 				{
-					/*
-					 * put implicit AND after an operand and handle this quote
-					 * in WAITOPERAND
-					 */
-					state->state = WAITOPERAND;
-					*operator = OP_AND;
-					return PT_OPR;
+					return PT_END;
 				}
 				else if (parse_or_operator(state))
 				{
@@ -487,15 +481,17 @@ gettoken_query_websearch(TSQueryParserState state, int8 *operator,
 					*operator = OP_OR;
 					return PT_OPR;
 				}
-				else if (*state->buf == '\0')
+				else if (ISOPERATOR(state->buf))
 				{
-					return PT_END;
+					/* ignore other operators in this state too */
+					state->buf++;
+					continue;
 				}
 				else if (!t_isspace(state->buf))
 				{
-					/* put implicit AND after an operand */
-					*operator = OP_AND;
+					/* insert implicit AND between operands */
 					state->state = WAITOPERAND;
+					*operator = OP_AND;
 					return PT_OPR;
 				}
 				break;

@@ -1,21 +1,17 @@
+/* Processed by ecpg (regression mode) */
+/* These include files are added by the preprocessor */
+#include <ecpglib.h>
+#include <ecpgerrno.h>
+#include <sqlca.h>
+/* End of automatic include section */
+#define ECPGdebug(X,Y) ECPGdebug((X)+100,(Y))
+
+#line 1 "define_prelim.pgc"
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Test that the effects of these commands don't carry over to the next
+ * file named on the ecpg command line.
  */
+
 
 /* Processed by ecpg (regression mode) */
 /* These include files are added by the preprocessor */
@@ -214,11 +210,57 @@ if (sqlca.sqlcode < 0) sqlprint ( );}
 
    
 
-   { ECPGdisconnect(__LINE__, "CURRENT");
-#line 56 "define.pgc"
+   /* test handling of a macro defined on the command line */
+   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select 123", ECPGt_EOIT, 
+	ECPGt_int,&(i),(long)1,(long)1,sizeof(int), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
+#line 57 "define.pgc"
 
 if (sqlca.sqlcode < 0) sqlprint ( );}
-#line 56 "define.pgc"
+#line 57 "define.pgc"
+
+   printf("original CMDLINESYM: %d\n", i);
+
+   
+
+   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select 42", ECPGt_EOIT, 
+	ECPGt_int,&(i),(long)1,(long)1,sizeof(int), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
+#line 62 "define.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint ( );}
+#line 62 "define.pgc"
+
+   printf("redefined CMDLINESYM: %d\n", i);
+
+   
+
+   { ECPGdo(__LINE__, 0, 1, NULL, 0, ECPGst_normal, "select 43", ECPGt_EOIT, 
+	ECPGt_int,&(i),(long)1,(long)1,sizeof(int), 
+	ECPGt_NO_INDICATOR, NULL , 0L, 0L, 0L, ECPGt_EORT);
+#line 67 "define.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint ( );}
+#line 67 "define.pgc"
+
+   printf("redefined CMDLINESYM: %d\n", i);
+
+   
+
+   
+           
+   
+
+   /* this macro should not have carried over from define_prelim.pgc */
+   
+           
+   
+
+   { ECPGdisconnect(__LINE__, "CURRENT");
+#line 81 "define.pgc"
+
+if (sqlca.sqlcode < 0) sqlprint ( );}
+#line 81 "define.pgc"
 
    return 0;
 }

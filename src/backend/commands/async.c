@@ -22,7 +22,7 @@
  * async.c
  *	  Asynchronous notification: NOTIFY, LISTEN, UNLISTEN
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -1254,20 +1254,6 @@ Exec_UnlistenAllCommit(void)
 }
 
 /*
- * ProcessCompletedNotifies --- nowadays this does nothing
- *
- * This routine used to send signals and handle self-notifies,
- * but that functionality has been moved elsewhere.
- * We'd delete it entirely, except that the documentation used to instruct
- * background-worker authors to call it.  To avoid an ABI break in stable
- * branches, keep it as a no-op routine.
- */
-void
-ProcessCompletedNotifies(void)
-{
-}
-
-/*
  * Test whether we are actively listening on the given channel name.
  *
  * Note: this function is executed for every notification found in the queue.
@@ -2269,6 +2255,8 @@ asyncQueueAdvanceTail(void)
 static void
 ProcessIncomingNotify(bool flush)
 {
+	MemoryContext oldcontext;
+
 	/* We *must* reset the flag */
 	notifyInterruptPending = false;
 
@@ -2283,13 +2271,20 @@ ProcessIncomingNotify(bool flush)
 
 	/*
 	 * We must run asyncQueueReadAllNotifications inside a transaction, else
-	 * bad things happen if it gets an error.
+	 * bad things happen if it gets an error.  However, we need to preserve
+	 * the caller's memory context (typically MessageContext).
 	 */
+	oldcontext = CurrentMemoryContext;
+
 	StartTransactionCommand();
 
 	asyncQueueReadAllNotifications();
 
 	CommitTransactionCommand();
+
+	/* Caller's context had better not have been transaction-local */
+	Assert(MemoryContextIsValid(oldcontext));
+	MemoryContextSwitchTo(oldcontext);
 
 	/*
 	 * If this isn't an end-of-command case, we must flush the notify messages

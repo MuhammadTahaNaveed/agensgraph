@@ -22,7 +22,7 @@
  * orderedsetaggs.c
  *		Ordered-set aggregate functions.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -137,6 +137,7 @@ ordered_set_startup(FunctionCallInfo fcinfo, bool use_tuples)
 	OSAPerQueryState *qstate;
 	MemoryContext gcontext;
 	MemoryContext oldcontext;
+	int			tuplesortopt;
 
 	/*
 	 * Check we're called as aggregate (and not a window function), and get
@@ -302,6 +303,11 @@ ordered_set_startup(FunctionCallInfo fcinfo, bool use_tuples)
 	osastate->qstate = qstate;
 	osastate->gcontext = gcontext;
 
+	tuplesortopt = TUPLESORT_NONE;
+
+	if (qstate->rescan_needed)
+		tuplesortopt |= TUPLESORT_RANDOMACCESS;
+
 	/*
 	 * Initialize tuplesort object.
 	 */
@@ -314,7 +320,7 @@ ordered_set_startup(FunctionCallInfo fcinfo, bool use_tuples)
 												   qstate->sortNullsFirsts,
 												   work_mem,
 												   NULL,
-												   qstate->rescan_needed);
+												   tuplesortopt);
 	else
 		osastate->sortstate = tuplesort_begin_datum(qstate->sortColType,
 													qstate->sortOperator,
@@ -322,7 +328,7 @@ ordered_set_startup(FunctionCallInfo fcinfo, bool use_tuples)
 													qstate->sortNullsFirst,
 													work_mem,
 													NULL,
-													qstate->rescan_needed);
+													tuplesortopt);
 
 	osastate->number_of_rows = 0;
 	osastate->sort_done = false;

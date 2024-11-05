@@ -45,7 +45,7 @@
 #include "libpq/pqformat.h"
 #include "utils/builtins.h"
 #include "utils/cash.h"
-#include "utils/int8.h"
+#include "utils/float.h"
 #include "utils/numeric.h"
 #include "utils/pg_locale.h"
 
@@ -105,6 +105,82 @@ num_word(Cash value)
 
 	return buf;
 }								/* num_word() */
+
+static inline Cash
+cash_pl_cash(Cash c1, Cash c2)
+{
+	Cash		res;
+
+	if (unlikely(pg_add_s64_overflow(c1, c2, &res)))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("money out of range")));
+
+	return res;
+}
+
+static inline Cash
+cash_mi_cash(Cash c1, Cash c2)
+{
+	Cash		res;
+
+	if (unlikely(pg_sub_s64_overflow(c1, c2, &res)))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("money out of range")));
+
+	return res;
+}
+
+static inline Cash
+cash_mul_float8(Cash c, float8 f)
+{
+	float8		res = rint(float8_mul((float8) c, f));
+
+	if (unlikely(isnan(res) || !FLOAT8_FITS_IN_INT64(res)))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("money out of range")));
+
+	return (Cash) res;
+}
+
+static inline Cash
+cash_div_float8(Cash c, float8 f)
+{
+	float8		res = rint(float8_div((float8) c, f));
+
+	if (unlikely(isnan(res) || !FLOAT8_FITS_IN_INT64(res)))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("money out of range")));
+
+	return (Cash) res;
+}
+
+static inline Cash
+cash_mul_int64(Cash c, int64 i)
+{
+	Cash		res;
+
+	if (unlikely(pg_mul_s64_overflow(c, i, &res)))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("money out of range")));
+
+	return res;
+}
+
+static inline Cash
+cash_div_int64(Cash c, int64 i)
+{
+	if (unlikely(i == 0))
+		ereport(ERROR,
+				(errcode(ERRCODE_DIVISION_BY_ZERO),
+				 errmsg("division by zero")));
+
+	return c / i;
+}
 
 /* cash_in()
  * Convert a string to a cash data type.
@@ -631,11 +707,8 @@ cash_pl(PG_FUNCTION_ARGS)
 {
 	Cash		c1 = PG_GETARG_CASH(0);
 	Cash		c2 = PG_GETARG_CASH(1);
-	Cash		result;
 
-	result = c1 + c2;
-
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_pl_cash(c1, c2));
 }
 
 
@@ -647,11 +720,8 @@ cash_mi(PG_FUNCTION_ARGS)
 {
 	Cash		c1 = PG_GETARG_CASH(0);
 	Cash		c2 = PG_GETARG_CASH(1);
-	Cash		result;
 
-	result = c1 - c2;
-
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mi_cash(c1, c2));
 }
 
 
@@ -683,10 +753,8 @@ cash_mul_flt8(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	float8		f = PG_GETARG_FLOAT8(1);
-	Cash		result;
 
-	result = rint(c * f);
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_float8(c, f));
 }
 
 
@@ -698,10 +766,8 @@ flt8_mul_cash(PG_FUNCTION_ARGS)
 {
 	float8		f = PG_GETARG_FLOAT8(0);
 	Cash		c = PG_GETARG_CASH(1);
-	Cash		result;
 
-	result = rint(f * c);
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_float8(c, f));
 }
 
 
@@ -713,15 +779,8 @@ cash_div_flt8(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	float8		f = PG_GETARG_FLOAT8(1);
-	Cash		result;
 
-	if (f == 0.0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DIVISION_BY_ZERO),
-				 errmsg("division by zero")));
-
-	result = rint(c / f);
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_div_float8(c, f));
 }
 
 
@@ -733,10 +792,8 @@ cash_mul_flt4(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	float4		f = PG_GETARG_FLOAT4(1);
-	Cash		result;
 
-	result = rint(c * (float8) f);
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_float8(c, (float8) f));
 }
 
 
@@ -748,10 +805,8 @@ flt4_mul_cash(PG_FUNCTION_ARGS)
 {
 	float4		f = PG_GETARG_FLOAT4(0);
 	Cash		c = PG_GETARG_CASH(1);
-	Cash		result;
 
-	result = rint((float8) f * c);
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_float8(c, (float8) f));
 }
 
 
@@ -764,15 +819,8 @@ cash_div_flt4(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	float4		f = PG_GETARG_FLOAT4(1);
-	Cash		result;
 
-	if (f == 0.0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DIVISION_BY_ZERO),
-				 errmsg("division by zero")));
-
-	result = rint(c / (float8) f);
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_div_float8(c, (float8) f));
 }
 
 
@@ -784,10 +832,8 @@ cash_mul_int8(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	int64		i = PG_GETARG_INT64(1);
-	Cash		result;
 
-	result = c * i;
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_int64(c, i));
 }
 
 
@@ -799,10 +845,8 @@ int8_mul_cash(PG_FUNCTION_ARGS)
 {
 	int64		i = PG_GETARG_INT64(0);
 	Cash		c = PG_GETARG_CASH(1);
-	Cash		result;
 
-	result = i * c;
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_int64(c, i));
 }
 
 /* cash_div_int8()
@@ -813,16 +857,8 @@ cash_div_int8(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	int64		i = PG_GETARG_INT64(1);
-	Cash		result;
 
-	if (i == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DIVISION_BY_ZERO),
-				 errmsg("division by zero")));
-
-	result = c / i;
-
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_div_int64(c, i));
 }
 
 
@@ -834,10 +870,8 @@ cash_mul_int4(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	int32		i = PG_GETARG_INT32(1);
-	Cash		result;
 
-	result = c * i;
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_int64(c, (int64) i));
 }
 
 
@@ -849,10 +883,8 @@ int4_mul_cash(PG_FUNCTION_ARGS)
 {
 	int32		i = PG_GETARG_INT32(0);
 	Cash		c = PG_GETARG_CASH(1);
-	Cash		result;
 
-	result = i * c;
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_int64(c, (int64) i));
 }
 
 
@@ -865,16 +897,8 @@ cash_div_int4(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	int32		i = PG_GETARG_INT32(1);
-	Cash		result;
 
-	if (i == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DIVISION_BY_ZERO),
-				 errmsg("division by zero")));
-
-	result = c / i;
-
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_div_int64(c, (int64) i));
 }
 
 
@@ -886,10 +910,8 @@ cash_mul_int2(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	int16		s = PG_GETARG_INT16(1);
-	Cash		result;
 
-	result = c * s;
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_int64(c, (int64) s));
 }
 
 /* int2_mul_cash()
@@ -900,10 +922,8 @@ int2_mul_cash(PG_FUNCTION_ARGS)
 {
 	int16		s = PG_GETARG_INT16(0);
 	Cash		c = PG_GETARG_CASH(1);
-	Cash		result;
 
-	result = s * c;
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_mul_int64(c, (int64) s));
 }
 
 /* cash_div_int2()
@@ -915,15 +935,8 @@ cash_div_int2(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	int16		s = PG_GETARG_INT16(1);
-	Cash		result;
 
-	if (s == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DIVISION_BY_ZERO),
-				 errmsg("division by zero")));
-
-	result = c / s;
-	PG_RETURN_CASH(result);
+	PG_RETURN_CASH(cash_div_int64(c, (int64) s));
 }
 
 /* cashlarger()

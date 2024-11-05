@@ -22,7 +22,7 @@
  * version.c
  *	 Returns the PostgreSQL version string
  *
- * Copyright (c) 1998-2021, PostgreSQL Global Development Group
+ * Copyright (c) 1998-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *

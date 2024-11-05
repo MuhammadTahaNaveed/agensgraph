@@ -23,7 +23,7 @@
  *	  prototypes for postgres.c.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/tcop/tcopprot.h
@@ -44,11 +44,11 @@
 /* Required daylight between max_stack_depth and the kernel limit, in bytes */
 #define STACK_DEPTH_SLOP (512 * 1024L)
 
-extern CommandDest whereToSendOutput;
+extern PGDLLIMPORT CommandDest whereToSendOutput;
 extern PGDLLIMPORT const char *debug_query_string;
-extern int	max_stack_depth;
-extern int	PostAuthDelay;
-extern int	client_connection_check_interval;
+extern PGDLLIMPORT int max_stack_depth;
+extern PGDLLIMPORT int PostAuthDelay;
+extern PGDLLIMPORT int client_connection_check_interval;
 
 /* GUC-configurable parameters */
 
@@ -62,13 +62,24 @@ typedef enum
 
 extern PGDLLIMPORT int log_statement;
 
+/* Flags for restrict_nonsystem_relation_kind value */
+#define RESTRICT_RELKIND_VIEW			0x01
+#define RESTRICT_RELKIND_FOREIGN_TABLE	0x02
+
+extern PGDLLIMPORT int restrict_nonsystem_relation_kind;
+
 extern List *pg_parse_query(const char *query_string);
 extern List *pg_rewrite_query(Query *query);
-extern List *pg_analyze_and_rewrite(RawStmt *parsetree,
-									const char *query_string,
-									Oid *paramTypes, int numParams,
-									QueryEnvironment *queryEnv);
-extern List *pg_analyze_and_rewrite_params(RawStmt *parsetree,
+extern List *pg_analyze_and_rewrite_fixedparams(RawStmt *parsetree,
+												const char *query_string,
+												const Oid *paramTypes, int numParams,
+												QueryEnvironment *queryEnv);
+extern List *pg_analyze_and_rewrite_varparams(RawStmt *parsetree,
+											  const char *query_string,
+											  Oid **paramTypes,
+											  int *numParams,
+											  QueryEnvironment *queryEnv);
+extern List *pg_analyze_and_rewrite_withcb(RawStmt *parsetree,
 										   const char *query_string,
 										   ParserSetupHook parserSetup,
 										   void *parserSetupArg,
@@ -82,6 +93,9 @@ extern List *pg_plan_queries(List *querytrees, const char *query_string,
 
 extern bool check_max_stack_depth(int *newval, void **extra, GucSource source);
 extern void assign_max_stack_depth(int newval, void *extra);
+extern bool check_restrict_nonsystem_relation_kind(char **newval, void **extra,
+												   GucSource source);
+extern void assign_restrict_nonsystem_relation_kind(const char *newval, void *extra);
 
 extern void die(SIGNAL_ARGS);
 extern void quickdie(SIGNAL_ARGS) pg_attribute_noreturn();
@@ -94,8 +108,9 @@ extern void ProcessClientWriteInterrupt(bool blocked);
 
 extern void process_postgres_switches(int argc, char *argv[],
 									  GucContext ctx, const char **dbname);
-extern void PostgresMain(int argc, char *argv[],
-						 const char *dbname,
+extern void PostgresSingleUserMain(int argc, char *argv[],
+								   const char *username) pg_attribute_noreturn();
+extern void PostgresMain(const char *dbname,
 						 const char *username) pg_attribute_noreturn();
 extern long get_stack_depth_rlimit(void);
 extern void ResetUsage(void);

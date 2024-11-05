@@ -35,7 +35,7 @@
  * bitcode.
  *
  *
- * Copyright (c) 2016-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/jit/llvm/llvmjit_types.c
@@ -67,7 +67,7 @@
 PGFunction	TypePGFunction;
 size_t		TypeSizeT;
 bool		TypeStorageBool;
-ExprStateEvalFunc TypeExprStateEvalFunc;
+
 ExecEvalSubroutine TypeExecEvalSubroutine;
 ExecEvalBoolSubroutine TypeExecEvalBoolSubroutine;
 
@@ -80,11 +80,14 @@ ExprEvalStep StructExprEvalStep;
 ExprState	StructExprState;
 FunctionCallInfoBaseData StructFunctionCallInfoData;
 HeapTupleData StructHeapTupleData;
+HeapTupleHeaderData StructHeapTupleHeaderData;
 MemoryContextData StructMemoryContextData;
 TupleTableSlot StructTupleTableSlot;
 HeapTupleTableSlot StructHeapTupleTableSlot;
 MinimalTupleTableSlot StructMinimalTupleTableSlot;
 TupleDescData StructTupleDescData;
+PlanState	StructPlanState;
+MinimalTupleData StructMinimalTupleData;
 
 
 /*
@@ -96,7 +99,40 @@ extern Datum AttributeTemplate(PG_FUNCTION_ARGS);
 Datum
 AttributeTemplate(PG_FUNCTION_ARGS)
 {
+	AssertVariableIsOfType(&AttributeTemplate, PGFunction);
+
 	PG_RETURN_NULL();
+}
+
+/*
+ * And some more "templates" to give us examples of function types
+ * corresponding to function pointer types.
+ */
+
+extern void ExecEvalSubroutineTemplate(ExprState *state,
+									   struct ExprEvalStep *op,
+									   ExprContext *econtext);
+void
+ExecEvalSubroutineTemplate(ExprState *state,
+						   struct ExprEvalStep *op,
+						   ExprContext *econtext)
+{
+	AssertVariableIsOfType(&ExecEvalSubroutineTemplate,
+						   ExecEvalSubroutine);
+}
+
+extern bool ExecEvalBoolSubroutineTemplate(ExprState *state,
+										   struct ExprEvalStep *op,
+										   ExprContext *econtext);
+bool
+ExecEvalBoolSubroutineTemplate(ExprState *state,
+							   struct ExprEvalStep *op,
+							   ExprContext *econtext)
+{
+	AssertVariableIsOfType(&ExecEvalBoolSubroutineTemplate,
+						   ExecEvalBoolSubroutine);
+
+	return false;
 }
 
 /*
@@ -155,4 +191,5 @@ void	   *referenced_functions[] =
 	slot_getsomeattrs_int,
 	strlen,
 	varsize_any,
+	ExecInterpExprStillValid,
 };

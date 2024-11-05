@@ -57,7 +57,7 @@
  * by re-setting the page's page_dirty flag.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/slru.c
@@ -73,6 +73,7 @@
 #include "access/slru.h"
 #include "access/transam.h"
 #include "access/xlog.h"
+#include "access/xlogutils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/fd.h"
@@ -200,6 +201,7 @@ SimpleLruShmemSize(int nslots, int nlsns)
  * ctllock: LWLock to use to control access to the shared control structure.
  * subdir: PGDATA-relative subdirectory that will contain the files.
  * tranche_id: LWLock tranche ID to use for the SLRU's per-buffer LWLocks.
+ * sync_handler: which set of functions to use to handle sync requests
  */
 void
 SimpleLruInit(SlruCtl ctl, const char *name, int nslots, int nlsns,
@@ -233,7 +235,7 @@ SimpleLruInit(SlruCtl ctl, const char *name, int nslots, int nlsns,
 
 		/* shared->latest_page_number will be set later */
 
-		shared->slru_stats_idx = pgstat_slru_index(name);
+		shared->slru_stats_idx = pgstat_get_slru_index(name);
 
 		ptr = (char *) shared;
 		offset = MAXALIGN(sizeof(SlruSharedData));
@@ -967,7 +969,7 @@ SlruReportIOError(SlruCtl ctl, int pageno, TransactionId xid)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not access status of transaction %u", xid),
-					 errdetail("Could not seek in file \"%s\" to offset %u: %m.",
+					 errdetail("Could not seek in file \"%s\" to offset %d: %m.",
 							   path, offset)));
 			break;
 		case SLRU_READ_FAILED:
@@ -975,24 +977,24 @@ SlruReportIOError(SlruCtl ctl, int pageno, TransactionId xid)
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not access status of transaction %u", xid),
-						 errdetail("Could not read from file \"%s\" at offset %u: %m.",
+						 errdetail("Could not read from file \"%s\" at offset %d: %m.",
 								   path, offset)));
 			else
 				ereport(ERROR,
 						(errmsg("could not access status of transaction %u", xid),
-						 errdetail("Could not read from file \"%s\" at offset %u: read too few bytes.", path, offset)));
+						 errdetail("Could not read from file \"%s\" at offset %d: read too few bytes.", path, offset)));
 			break;
 		case SLRU_WRITE_FAILED:
 			if (errno)
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not access status of transaction %u", xid),
-						 errdetail("Could not write to file \"%s\" at offset %u: %m.",
+						 errdetail("Could not write to file \"%s\" at offset %d: %m.",
 								   path, offset)));
 			else
 				ereport(ERROR,
 						(errmsg("could not access status of transaction %u", xid),
-						 errdetail("Could not write to file \"%s\" at offset %u: wrote too few bytes.",
+						 errdetail("Could not write to file \"%s\" at offset %d: wrote too few bytes.",
 								   path, offset)));
 			break;
 		case SLRU_FSYNC_FAILED:
@@ -1620,7 +1622,9 @@ SlruSyncFileTag(SlruCtl ctl, const FileTag *ftag, char *path)
 	if (fd < 0)
 		return -1;
 
+	pgstat_report_wait_start(WAIT_EVENT_SLRU_FLUSH_SYNC);
 	result = pg_fsync(fd);
+	pgstat_report_wait_end();
 	save_errno = errno;
 
 	CloseTransientFile(fd);

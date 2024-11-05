@@ -22,7 +22,7 @@
  * catcache.c
  *	  System catalog cache for tuples matching a key.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -40,11 +40,14 @@
 #include "access/table.h"
 #include "access/valid.h"
 #include "access/xact.h"
+#include "catalog/catalog.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
 #include "common/hashfn.h"
+#include "common/pg_prng.h"
 #include "miscadmin.h"
+#include "port/pg_bitutils.h"
 #ifdef CATCACHE_STATS
 #include "storage/ipc.h"		/* for on_proc_exit */
 #endif
@@ -108,10 +111,10 @@ static void CatCachePrintStats(int code, Datum arg);
 static void CatCacheRemoveCTup(CatCache *cache, CatCTup *ct);
 static void CatCacheRemoveCList(CatCache *cache, CatCList *cl);
 static void CatalogCacheInitializeCache(CatCache *cache);
-static CatCTup *CatalogCacheCreateEntry(CatCache *cache, HeapTuple ntp,
+static CatCTup *CatalogCacheCreateEntry(CatCache *cache,
+										HeapTuple ntp, SysScanDesc scandesc,
 										Datum *arguments,
-										uint32 hashValue, Index hashIndex,
-										bool negative);
+										uint32 hashValue, Index hashIndex);
 
 static void CatCacheFreeKeys(TupleDesc tupdesc, int nkeys, int *attnos,
 							 Datum *keys);
@@ -301,25 +304,18 @@ CatalogCacheComputeHashValue(CatCache *cache, int nkeys,
 	{
 		case 4:
 			oneHash = (cc_hashfunc[3]) (v4);
-
-			hashValue ^= oneHash << 24;
-			hashValue ^= oneHash >> 8;
+			hashValue ^= pg_rotate_left32(oneHash, 24);
 			/* FALLTHROUGH */
 		case 3:
 			oneHash = (cc_hashfunc[2]) (v3);
-
-			hashValue ^= oneHash << 16;
-			hashValue ^= oneHash >> 16;
+			hashValue ^= pg_rotate_left32(oneHash, 16);
 			/* FALLTHROUGH */
 		case 2:
 			oneHash = (cc_hashfunc[1]) (v2);
-
-			hashValue ^= oneHash << 8;
-			hashValue ^= oneHash >> 24;
+			hashValue ^= pg_rotate_left32(oneHash, 8);
 			/* FALLTHROUGH */
 		case 1:
 			oneHash = (cc_hashfunc[0]) (v1);
-
 			hashValue ^= oneHash;
 			break;
 		default:
@@ -1343,6 +1339,7 @@ SearchCatCacheMiss(CatCache *cache,
 	SysScanDesc scandesc;
 	HeapTuple	ntp;
 	CatCTup    *ct;
+	bool		stale;
 	Datum		arguments[CATCACHE_MAXKEYS];
 
 	/* Initialize local parameter array */
@@ -1350,16 +1347,6 @@ SearchCatCacheMiss(CatCache *cache,
 	arguments[1] = v2;
 	arguments[2] = v3;
 	arguments[3] = v4;
-
-	/*
-	 * Ok, need to make a lookup in the relation, copy the scankey and fill
-	 * out any per-call fields.
-	 */
-	memcpy(cur_skey, cache->cc_skey, sizeof(ScanKeyData) * nkeys);
-	cur_skey[0].sk_argument = v1;
-	cur_skey[1].sk_argument = v2;
-	cur_skey[2].sk_argument = v3;
-	cur_skey[3].sk_argument = v4;
 
 	/*
 	 * Tuple was not found in cache, so we have to try to retrieve it directly
@@ -1375,31 +1362,57 @@ SearchCatCacheMiss(CatCache *cache,
 	 * will eventually age out of the cache, so there's no functional problem.
 	 * This case is rare enough that it's not worth expending extra cycles to
 	 * detect.
+	 *
+	 * Another case, which we *must* handle, is that the tuple could become
+	 * outdated during CatalogCacheCreateEntry's attempt to detoast it (since
+	 * AcceptInvalidationMessages can run during TOAST table access).  We do
+	 * not want to return already-stale catcache entries, so we loop around
+	 * and do the table scan again if that happens.
 	 */
 	relation = table_open(cache->cc_reloid, AccessShareLock);
 
-	scandesc = systable_beginscan(relation,
-								  cache->cc_indexoid,
-								  IndexScanOK(cache, cur_skey),
-								  NULL,
-								  nkeys,
-								  cur_skey);
-
-	ct = NULL;
-
-	while (HeapTupleIsValid(ntp = systable_getnext(scandesc)))
+	do
 	{
-		ct = CatalogCacheCreateEntry(cache, ntp, arguments,
-									 hashValue, hashIndex,
-									 false);
-		/* immediately set the refcount to 1 */
-		ResourceOwnerEnlargeCatCacheRefs(CurrentResourceOwner);
-		ct->refcount++;
-		ResourceOwnerRememberCatCacheRef(CurrentResourceOwner, &ct->tuple);
-		break;					/* assume only one match */
-	}
+		/*
+		 * Ok, need to make a lookup in the relation, copy the scankey and
+		 * fill out any per-call fields.  (We must re-do this when retrying,
+		 * because systable_beginscan scribbles on the scankey.)
+		 */
+		memcpy(cur_skey, cache->cc_skey, sizeof(ScanKeyData) * nkeys);
+		cur_skey[0].sk_argument = v1;
+		cur_skey[1].sk_argument = v2;
+		cur_skey[2].sk_argument = v3;
+		cur_skey[3].sk_argument = v4;
 
-	systable_endscan(scandesc);
+		scandesc = systable_beginscan(relation,
+									  cache->cc_indexoid,
+									  IndexScanOK(cache, cur_skey),
+									  NULL,
+									  nkeys,
+									  cur_skey);
+
+		ct = NULL;
+		stale = false;
+
+		while (HeapTupleIsValid(ntp = systable_getnext(scandesc)))
+		{
+			ct = CatalogCacheCreateEntry(cache, ntp, scandesc, NULL,
+										 hashValue, hashIndex);
+			/* upon failure, we must start the scan over */
+			if (ct == NULL)
+			{
+				stale = true;
+				break;
+			}
+			/* immediately set the refcount to 1 */
+			ResourceOwnerEnlargeCatCacheRefs(CurrentResourceOwner);
+			ct->refcount++;
+			ResourceOwnerRememberCatCacheRef(CurrentResourceOwner, &ct->tuple);
+			break;				/* assume only one match */
+		}
+
+		systable_endscan(scandesc);
+	} while (stale);
 
 	table_close(relation, AccessShareLock);
 
@@ -1418,9 +1431,11 @@ SearchCatCacheMiss(CatCache *cache,
 		if (IsBootstrapProcessingMode())
 			return NULL;
 
-		ct = CatalogCacheCreateEntry(cache, NULL, arguments,
-									 hashValue, hashIndex,
-									 true);
+		ct = CatalogCacheCreateEntry(cache, NULL, NULL, arguments,
+									 hashValue, hashIndex);
+
+		/* Creating a negative cache entry shouldn't fail */
+		Assert(ct != NULL);
 
 		CACHE_elog(DEBUG2, "SearchCatCache(%s): Contains %d/%d tuples",
 				   cache->cc_relname, cache->cc_ntup, CacheHdr->ch_ntup);
@@ -1627,7 +1642,8 @@ SearchCatCacheList(CatCache *cache,
 	 * We have to bump the member refcounts temporarily to ensure they won't
 	 * get dropped from the cache while loading other members. We use a PG_TRY
 	 * block to ensure we can undo those refcounts if we get an error before
-	 * we finish constructing the CatCList.
+	 * we finish constructing the CatCList.  ctlist must be valid throughout
+	 * the PG_TRY block.
 	 */
 	ResourceOwnerEnlargeCatCacheListRefs(CurrentResourceOwner);
 
@@ -1638,83 +1654,113 @@ SearchCatCacheList(CatCache *cache,
 		ScanKeyData cur_skey[CATCACHE_MAXKEYS];
 		Relation	relation;
 		SysScanDesc scandesc;
-
-		/*
-		 * Ok, need to make a lookup in the relation, copy the scankey and
-		 * fill out any per-call fields.
-		 */
-		memcpy(cur_skey, cache->cc_skey, sizeof(ScanKeyData) * cache->cc_nkeys);
-		cur_skey[0].sk_argument = v1;
-		cur_skey[1].sk_argument = v2;
-		cur_skey[2].sk_argument = v3;
-		cur_skey[3].sk_argument = v4;
+		bool		stale;
 
 		relation = table_open(cache->cc_reloid, AccessShareLock);
 
-		scandesc = systable_beginscan(relation,
-									  cache->cc_indexoid,
-									  IndexScanOK(cache, cur_skey),
-									  NULL,
-									  nkeys,
-									  cur_skey);
-
-		/* The list will be ordered iff we are doing an index scan */
-		ordered = (scandesc->irel != NULL);
-
-		while (HeapTupleIsValid(ntp = systable_getnext(scandesc)))
+		do
 		{
-			uint32		hashValue;
-			Index		hashIndex;
-			bool		found = false;
-			dlist_head *bucket;
-
 			/*
-			 * See if there's an entry for this tuple already.
+			 * Ok, need to make a lookup in the relation, copy the scankey and
+			 * fill out any per-call fields.  (We must re-do this when
+			 * retrying, because systable_beginscan scribbles on the scankey.)
 			 */
-			ct = NULL;
-			hashValue = CatalogCacheComputeTupleHashValue(cache, cache->cc_nkeys, ntp);
-			hashIndex = HASH_INDEX(hashValue, cache->cc_nbuckets);
+			memcpy(cur_skey, cache->cc_skey, sizeof(ScanKeyData) * cache->cc_nkeys);
+			cur_skey[0].sk_argument = v1;
+			cur_skey[1].sk_argument = v2;
+			cur_skey[2].sk_argument = v3;
+			cur_skey[3].sk_argument = v4;
 
-			bucket = &cache->cc_bucket[hashIndex];
-			dlist_foreach(iter, bucket)
+			scandesc = systable_beginscan(relation,
+										  cache->cc_indexoid,
+										  IndexScanOK(cache, cur_skey),
+										  NULL,
+										  nkeys,
+										  cur_skey);
+
+			/* The list will be ordered iff we are doing an index scan */
+			ordered = (scandesc->irel != NULL);
+
+			stale = false;
+
+			while (HeapTupleIsValid(ntp = systable_getnext(scandesc)))
 			{
-				ct = dlist_container(CatCTup, cache_elem, iter.cur);
-
-				if (ct->dead || ct->negative)
-					continue;	/* ignore dead and negative entries */
-
-				if (ct->hash_value != hashValue)
-					continue;	/* quickly skip entry if wrong hash val */
-
-				if (!ItemPointerEquals(&(ct->tuple.t_self), &(ntp->t_self)))
-					continue;	/* not same tuple */
+				uint32		hashValue;
+				Index		hashIndex;
+				bool		found = false;
+				dlist_head *bucket;
 
 				/*
-				 * Found a match, but can't use it if it belongs to another
-				 * list already
+				 * See if there's an entry for this tuple already.
 				 */
-				if (ct->c_list)
-					continue;
+				ct = NULL;
+				hashValue = CatalogCacheComputeTupleHashValue(cache, cache->cc_nkeys, ntp);
+				hashIndex = HASH_INDEX(hashValue, cache->cc_nbuckets);
 
-				found = true;
-				break;			/* A-OK */
+				bucket = &cache->cc_bucket[hashIndex];
+				dlist_foreach(iter, bucket)
+				{
+					ct = dlist_container(CatCTup, cache_elem, iter.cur);
+
+					if (ct->dead || ct->negative)
+						continue;	/* ignore dead and negative entries */
+
+					if (ct->hash_value != hashValue)
+						continue;	/* quickly skip entry if wrong hash val */
+
+					if (!ItemPointerEquals(&(ct->tuple.t_self), &(ntp->t_self)))
+						continue;	/* not same tuple */
+
+					/*
+					 * Found a match, but can't use it if it belongs to
+					 * another list already
+					 */
+					if (ct->c_list)
+						continue;
+
+					found = true;
+					break;		/* A-OK */
+				}
+
+				if (!found)
+				{
+					/* We didn't find a usable entry, so make a new one */
+					ct = CatalogCacheCreateEntry(cache, ntp, scandesc, NULL,
+												 hashValue, hashIndex);
+					/* upon failure, we must start the scan over */
+					if (ct == NULL)
+					{
+						/*
+						 * Release refcounts on any items we already had.  We
+						 * dare not try to free them if they're now
+						 * unreferenced, since an error while doing that would
+						 * result in the PG_CATCH below doing extra refcount
+						 * decrements.  Besides, we'll likely re-adopt those
+						 * items in the next iteration, so it's not worth
+						 * complicating matters to try to get rid of them.
+						 */
+						foreach(ctlist_item, ctlist)
+						{
+							ct = (CatCTup *) lfirst(ctlist_item);
+							Assert(ct->c_list == NULL);
+							Assert(ct->refcount > 0);
+							ct->refcount--;
+						}
+						/* Reset ctlist in preparation for new try */
+						ctlist = NIL;
+						stale = true;
+						break;
+					}
+				}
+
+				/* Careful here: add entry to ctlist, then bump its refcount */
+				/* This way leaves state correct if lappend runs out of memory */
+				ctlist = lappend(ctlist, ct);
+				ct->refcount++;
 			}
 
-			if (!found)
-			{
-				/* We didn't find a usable entry, so make a new one */
-				ct = CatalogCacheCreateEntry(cache, ntp, arguments,
-											 hashValue, hashIndex,
-											 false);
-			}
-
-			/* Careful here: add entry to ctlist, then bump its refcount */
-			/* This way leaves state correct if lappend runs out of memory */
-			ctlist = lappend(ctlist, ct);
-			ct->refcount++;
-		}
-
-		systable_endscan(scandesc);
+			systable_endscan(scandesc);
+		} while (stale);
 
 		table_close(relation, AccessShareLock);
 
@@ -1736,7 +1782,6 @@ SearchCatCacheList(CatCache *cache,
 		 * we'd better do so before we start marking the members as belonging
 		 * to the list.
 		 */
-
 	}
 	PG_CATCH();
 	{
@@ -1819,25 +1864,62 @@ ReleaseCatCacheList(CatCList *list)
 
 
 /*
+ * equalTuple
+ *		Are these tuples memcmp()-equal?
+ */
+static bool
+equalTuple(HeapTuple a, HeapTuple b)
+{
+	uint32		alen;
+	uint32		blen;
+
+	alen = a->t_len;
+	blen = b->t_len;
+	return (alen == blen &&
+			memcmp((char *) a->t_data,
+				   (char *) b->t_data, blen) == 0);
+}
+
+/*
  * CatalogCacheCreateEntry
  *		Create a new CatCTup entry, copying the given HeapTuple and other
  *		supplied data into it.  The new entry initially has refcount 0.
+ *
+ * To create a normal cache entry, ntp must be the HeapTuple just fetched
+ * from scandesc, and "arguments" is not used.  To create a negative cache
+ * entry, pass NULL for ntp and scandesc; then "arguments" is the cache
+ * keys to use.  In either case, hashValue/hashIndex are the hash values
+ * computed from the cache keys.
+ *
+ * Returns NULL if we attempt to detoast the tuple and observe that it
+ * became stale.  (This cannot happen for a negative entry.)  Caller must
+ * retry the tuple lookup in that case.
  */
 static CatCTup *
-CatalogCacheCreateEntry(CatCache *cache, HeapTuple ntp, Datum *arguments,
-						uint32 hashValue, Index hashIndex,
-						bool negative)
+CatalogCacheCreateEntry(CatCache *cache, HeapTuple ntp, SysScanDesc scandesc,
+						Datum *arguments,
+						uint32 hashValue, Index hashIndex)
 {
 	CatCTup    *ct;
 	HeapTuple	dtp;
 	MemoryContext oldcxt;
 
-	/* negative entries have no tuple associated */
 	if (ntp)
 	{
 		int			i;
 
-		Assert(!negative);
+		/*
+		 * The visibility recheck below essentially never fails during our
+		 * regression tests, and there's no easy way to force it to fail for
+		 * testing purposes.  To ensure we have test coverage for the retry
+		 * paths in our callers, make debug builds randomly fail about 0.1% of
+		 * the times through this code path, even when there's no toasted
+		 * fields.
+		 */
+#ifdef USE_ASSERT_CHECKING
+		if (pg_prng_uint32(&pg_global_prng_state) <= (PG_UINT32_MAX / 1000))
+			return NULL;
+#endif
 
 		/*
 		 * If there are any out-of-line toasted fields in the tuple, expand
@@ -1847,7 +1929,40 @@ CatalogCacheCreateEntry(CatCache *cache, HeapTuple ntp, Datum *arguments,
 		 * something using a slightly stale catcache entry.
 		 */
 		if (HeapTupleHasExternal(ntp))
+		{
+			bool		need_cmp = IsInplaceUpdateOid(cache->cc_reloid);
+			HeapTuple	before = NULL;
+			bool		matches = true;
+
+			if (need_cmp)
+				before = heap_copytuple(ntp);
 			dtp = toast_flatten_tuple(ntp, cache->cc_tupdesc);
+
+			/*
+			 * The tuple could become stale while we are doing toast table
+			 * access (since AcceptInvalidationMessages can run then).
+			 * equalTuple() detects staleness from inplace updates, while
+			 * systable_recheck_tuple() detects staleness from normal updates.
+			 *
+			 * While this equalTuple() follows the usual rule of reading with
+			 * a pin and no buffer lock, it warrants suspicion since an
+			 * inplace update could appear at any moment.  It's safe because
+			 * the inplace update sends an invalidation that can't reorder
+			 * before the inplace heap change.  If the heap change reaches
+			 * this process just after equalTuple() looks, we've not missed
+			 * its inval.
+			 */
+			if (need_cmp)
+			{
+				matches = equalTuple(before, ntp);
+				heap_freetuple(before);
+			}
+			if (!matches || !systable_recheck_tuple(scandesc, ntp))
+			{
+				heap_freetuple(dtp);
+				return NULL;
+			}
+		}
 		else
 			dtp = ntp;
 
@@ -1886,7 +2001,7 @@ CatalogCacheCreateEntry(CatCache *cache, HeapTuple ntp, Datum *arguments,
 	}
 	else
 	{
-		Assert(negative);
+		/* Set up keys for a negative cache entry */
 		oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 		ct = (CatCTup *) palloc(sizeof(CatCTup));
 
@@ -1908,7 +2023,7 @@ CatalogCacheCreateEntry(CatCache *cache, HeapTuple ntp, Datum *arguments,
 	ct->c_list = NULL;
 	ct->refcount = 0;			/* for the moment */
 	ct->dead = false;
-	ct->negative = negative;
+	ct->negative = (ntp == NULL);
 	ct->hash_value = hashValue;
 
 	dlist_push_head(&cache->cc_bucket[hashIndex], &ct->cache_elem);
@@ -1988,7 +2103,6 @@ CatCacheCopyKeys(TupleDesc tupdesc, int nkeys, int *attnos,
 							   att->attbyval,
 							   att->attlen);
 	}
-
 }
 
 /*
@@ -2029,7 +2143,8 @@ void
 PrepareToInvalidateCacheTuple(Relation relation,
 							  HeapTuple tuple,
 							  HeapTuple newtuple,
-							  void (*function) (int, uint32, Oid))
+							  void (*function) (int, uint32, Oid, void *),
+							  void *context)
 {
 	slist_iter	iter;
 	Oid			reloid;
@@ -2070,7 +2185,7 @@ PrepareToInvalidateCacheTuple(Relation relation,
 		hashvalue = CatalogCacheComputeTupleHashValue(ccp, ccp->cc_nkeys, tuple);
 		dbid = ccp->cc_relisshared ? (Oid) 0 : MyDatabaseId;
 
-		(*function) (ccp->id, hashvalue, dbid);
+		(*function) (ccp->id, hashvalue, dbid, context);
 
 		if (newtuple)
 		{
@@ -2079,7 +2194,7 @@ PrepareToInvalidateCacheTuple(Relation relation,
 			newhashvalue = CatalogCacheComputeTupleHashValue(ccp, ccp->cc_nkeys, newtuple);
 
 			if (newhashvalue != hashvalue)
-				(*function) (ccp->id, newhashvalue, dbid);
+				(*function) (ccp->id, newhashvalue, dbid, context);
 		}
 	}
 }

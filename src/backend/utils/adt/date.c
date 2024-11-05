@@ -22,7 +22,7 @@
  * date.c
  *	  implements DATE and TIME data types specified in SQL standard
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  *
@@ -41,6 +41,7 @@
 #include <time.h>
 
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "common/hashfn.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
@@ -457,25 +458,12 @@ date_cmp(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(0);
 }
 
-static int
-date_fastcmp(Datum x, Datum y, SortSupport ssup)
-{
-	DateADT		a = DatumGetDateADT(x);
-	DateADT		b = DatumGetDateADT(y);
-
-	if (a < b)
-		return -1;
-	else if (a > b)
-		return 1;
-	return 0;
-}
-
 Datum
 date_sortsupport(PG_FUNCTION_ARGS)
 {
 	SortSupport ssup = (SortSupport) PG_GETARG_POINTER(0);
 
-	ssup->comparator = date_fastcmp;
+	ssup->comparator = ssup_datum_int32_cmp;
 	PG_RETURN_VOID();
 }
 
@@ -1143,8 +1131,8 @@ extract_date(PG_FUNCTION_ARGS)
 			default:
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("date units \"%s\" not supported",
-								lowunits)));
+						 errmsg("unit \"%s\" not supported for type %s",
+								lowunits, format_type_be(DATEOID))));
 		}
 	}
 	else if (type == UNITS)
@@ -1226,8 +1214,8 @@ extract_date(PG_FUNCTION_ARGS)
 			default:
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("date units \"%s\" not supported",
-								lowunits)));
+						 errmsg("unit \"%s\" not supported for type %s",
+								lowunits, format_type_be(DATEOID))));
 				intresult = 0;
 		}
 	}
@@ -1242,8 +1230,8 @@ extract_date(PG_FUNCTION_ARGS)
 			default:
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("date units \"%s\" not supported",
-								lowunits)));
+						 errmsg("unit \"%s\" not supported for type %s",
+								lowunits, format_type_be(DATEOID))));
 				intresult = 0;
 		}
 	}
@@ -1251,7 +1239,8 @@ extract_date(PG_FUNCTION_ARGS)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("date units \"%s\" not recognized", lowunits)));
+				 errmsg("unit \"%s\" not recognized for type %s",
+						lowunits, format_type_be(DATEOID))));
 		intresult = 0;
 	}
 
@@ -1500,9 +1489,7 @@ float_time_overflows(int hour, int min, double sec)
 /* time2tm()
  * Convert time data type to POSIX time structure.
  *
- * For dates within the range of pg_time_t, convert to the local time zone.
- * If out of this range, leave as UTC (in practice that could only happen
- * if pg_time_t is just 32 bits) - thomas 97/05/27
+ * Note that only the hour/min/sec/fractional-sec fields are filled in.
  */
 int
 time2tm(TimeADT time, struct pg_tm *tm, fsec_t *fsec)
@@ -2223,9 +2210,9 @@ time_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 			case DTK_ISOYEAR:
 			default:
 				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"time\" units \"%s\" not recognized",
-								lowunits)));
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("unit \"%s\" not supported for type %s",
+								lowunits, format_type_be(TIMEOID))));
 				intresult = 0;
 		}
 	}
@@ -2240,8 +2227,8 @@ time_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("\"time\" units \"%s\" not recognized",
-						lowunits)));
+				 errmsg("unit \"%s\" not recognized for type %s",
+						lowunits, format_type_be(TIMEOID))));
 		intresult = 0;
 	}
 
@@ -3001,9 +2988,9 @@ timetz_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 			case DTK_MILLENNIUM:
 			default:
 				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"time with time zone\" units \"%s\" not recognized",
-								lowunits)));
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("unit \"%s\" not supported for type %s",
+								lowunits, format_type_be(TIMETZOID))));
 				intresult = 0;
 		}
 	}
@@ -3022,8 +3009,8 @@ timetz_part_common(PG_FUNCTION_ARGS, bool retnumeric)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("\"time with time zone\" units \"%s\" not recognized",
-						lowunits)));
+				 errmsg("unit \"%s\" not recognized for type %s",
+						lowunits, format_type_be(TIMETZOID))));
 		intresult = 0;
 	}
 
@@ -3048,7 +3035,7 @@ extract_timetz(PG_FUNCTION_ARGS)
 
 /* timetz_zone()
  * Encode time with time zone type with specified time zone.
- * Applies DST rules as of the current date.
+ * Applies DST rules as of the transaction start time.
  */
 Datum
 timetz_zone(PG_FUNCTION_ARGS)
@@ -3087,14 +3074,11 @@ timetz_zone(PG_FUNCTION_ARGS)
 	}
 	else if (type == DYNTZ)
 	{
-		/* dynamic-offset abbreviation, resolve using current time */
-		pg_time_t	now = (pg_time_t) time(NULL);
-		struct pg_tm *tm;
+		/* dynamic-offset abbreviation, resolve using transaction start time */
+		TimestampTz now = GetCurrentTransactionStartTimestamp();
+		int			isdst;
 
-		tm = pg_localtime(&now, tzp);
-		tm->tm_year += 1900;	/* adjust to PG conventions */
-		tm->tm_mon += 1;
-		tz = DetermineTimeZoneAbbrevOffset(tm, tzname, tzp);
+		tz = DetermineTimeZoneAbbrevOffsetTS(now, tzname, tzp, &isdst);
 	}
 	else
 	{
@@ -3102,12 +3086,15 @@ timetz_zone(PG_FUNCTION_ARGS)
 		tzp = pg_tzset(tzname);
 		if (tzp)
 		{
-			/* Get the offset-from-GMT that is valid today for the zone */
-			pg_time_t	now = (pg_time_t) time(NULL);
-			struct pg_tm *tm;
+			/* Get the offset-from-GMT that is valid now for the zone */
+			TimestampTz now = GetCurrentTransactionStartTimestamp();
+			struct pg_tm tm;
+			fsec_t		fsec;
 
-			tm = pg_localtime(&now, tzp);
-			tz = -tm->tm_gmtoff;
+			if (timestamp2tm(now, &tz, &tm, &fsec, NULL, tzp) != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+						 errmsg("timestamp out of range")));
 		}
 		else
 		{
@@ -3121,10 +3108,11 @@ timetz_zone(PG_FUNCTION_ARGS)
 	result = (TimeTzADT *) palloc(sizeof(TimeTzADT));
 
 	result->time = t->time + (t->zone - tz) * USECS_PER_SEC;
+	/* C99 modulo has the wrong sign convention for negative input */
 	while (result->time < INT64CONST(0))
 		result->time += USECS_PER_DAY;
-	while (result->time >= USECS_PER_DAY)
-		result->time -= USECS_PER_DAY;
+	if (result->time >= USECS_PER_DAY)
+		result->time %= USECS_PER_DAY;
 
 	result->zone = tz;
 
@@ -3154,10 +3142,11 @@ timetz_izone(PG_FUNCTION_ARGS)
 	result = (TimeTzADT *) palloc(sizeof(TimeTzADT));
 
 	result->time = time->time + (time->zone - tz) * USECS_PER_SEC;
+	/* C99 modulo has the wrong sign convention for negative input */
 	while (result->time < INT64CONST(0))
 		result->time += USECS_PER_DAY;
-	while (result->time >= USECS_PER_DAY)
-		result->time -= USECS_PER_DAY;
+	if (result->time >= USECS_PER_DAY)
+		result->time %= USECS_PER_DAY;
 
 	result->zone = tz;
 

@@ -32,10 +32,12 @@
  * Make sure _WIN32_WINNT has the minimum required value.
  * Leave a higher value in place. When building with at least Visual
  * Studio 2015 the minimum requirement is Windows Vista (0x0600) to
- * get support for GetLocaleInfoEx() with locales. For everything else
+ * get support for GetLocaleInfoEx() with locales. For other MSC versions
  * the minimum version is Windows XP (0x0501).
+ * For non-MSC compilers use 0x0600, which is required to get the inet_pton()
+ * declaration.
  */
-#if defined(_MSC_VER) && _MSC_VER >= 1900
+#if !defined(_MSC_VER) || _MSC_VER >= 1900
 #define MIN_WINNT 0x0600
 #else
 #define MIN_WINNT 0x0501
@@ -64,16 +66,26 @@
  * defines for dynamic linking on Win32 platform
  */
 
+/*
+ * Variables declared in the core backend and referenced by loadable
+ * modules need to be marked "dllimport" in the core build, but
+ * "dllexport" when the declaration is read in a loadable module.
+ * No special markings should be used when compiling frontend code.
+ */
+#ifndef FRONTEND
 #ifdef BUILDING_DLL
 #define PGDLLIMPORT __declspec (dllexport)
 #else
 #define PGDLLIMPORT __declspec (dllimport)
 #endif
+#endif
 
+/*
+ * Under MSVC, functions exported by a loadable module must be marked
+ * "dllexport".  Other compilers don't need that.
+ */
 #ifdef _MSC_VER
 #define PGDLLEXPORT __declspec (dllexport)
-#else
-#define PGDLLEXPORT
 #endif
 
 /*

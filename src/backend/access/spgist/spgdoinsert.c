@@ -23,7 +23,7 @@
  *	  implementation of insert algorithm
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -38,6 +38,7 @@
 #include "access/spgist_private.h"
 #include "access/spgxlog.h"
 #include "access/xloginsert.h"
+#include "common/pg_prng.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "utils/rel.h"
@@ -2229,7 +2230,9 @@ spgdoinsert(Relation index, SpGistState *state,
 				if (out.resultType == spgAddNode)
 					elog(ERROR, "cannot add a node to an allTheSame inner tuple");
 				else if (out.resultType == spgMatchNode)
-					out.result.matchNode.nodeN = random() % innerTuple->nNodes;
+					out.result.matchNode.nodeN =
+						pg_prng_uint64_range(&pg_global_prng_state,
+											 0, innerTuple->nNodes - 1);
 			}
 
 			switch (out.resultType)

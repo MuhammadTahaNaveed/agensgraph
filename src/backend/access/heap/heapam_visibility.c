@@ -71,7 +71,7 @@
  *	 HeapTupleSatisfiesAny()
  *		  all tuples are visible
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -1494,7 +1494,7 @@ HeapTupleIsSurelyDead(HeapTuple htup, GlobalVisState *vistest)
 	 * all relevant hint bits were just set moments ago).
 	 */
 	if (!HeapTupleHeaderXminCommitted(tuple))
-		return HeapTupleHeaderXminInvalid(tuple) ? true : false;
+		return HeapTupleHeaderXminInvalid(tuple);
 
 	/*
 	 * If the inserting transaction committed, but any deleting transaction

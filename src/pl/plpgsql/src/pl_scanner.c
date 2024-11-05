@@ -23,7 +23,7 @@
  *	  lexical scanning for PL/pgSQL
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -203,6 +203,8 @@ plpgsql_yylex(void)
 							tok1 = T_DATUM;
 						else
 							tok1 = T_CWORD;
+						/* Adjust token length to include A.B.C */
+						aux1.leng = aux5.lloc - aux1.lloc + aux5.leng;
 					}
 					else
 					{
@@ -216,6 +218,8 @@ plpgsql_yylex(void)
 							tok1 = T_DATUM;
 						else
 							tok1 = T_CWORD;
+						/* Adjust token length to include A.B */
+						aux1.leng = aux3.lloc - aux1.lloc + aux3.leng;
 					}
 				}
 				else
@@ -229,6 +233,8 @@ plpgsql_yylex(void)
 						tok1 = T_DATUM;
 					else
 						tok1 = T_CWORD;
+					/* Adjust token length to include A.B */
+					aux1.leng = aux3.lloc - aux1.lloc + aux3.leng;
 				}
 			}
 			else
@@ -315,6 +321,17 @@ plpgsql_yylex(void)
 	plpgsql_yyleng = aux1.leng;
 	plpgsql_yytoken = tok1;
 	return tok1;
+}
+
+/*
+ * Return the length of the token last returned by plpgsql_yylex().
+ *
+ * In the case of compound tokens, the length includes all the parts.
+ */
+int
+plpgsql_token_length(void)
+{
+	return plpgsql_yyleng;
 }
 
 /*

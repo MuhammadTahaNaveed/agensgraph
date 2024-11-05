@@ -3,7 +3,7 @@
  * postgres_fdw.c
  *		  Foreign-data wrapper for remote PostgreSQL servers
  *
- * Portions Copyright (c) 2012-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2012-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/postgres_fdw/postgres_fdw.c
@@ -31,6 +31,7 @@
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
+#include "optimizer/inherit.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -102,9 +103,9 @@ enum FdwModifyPrivateIndex
 	FdwModifyPrivateUpdateSql,
 	/* Integer list of target attribute numbers for INSERT/UPDATE */
 	FdwModifyPrivateTargetAttnums,
-	/* Length till the end of VALUES clause (as an integer Value node) */
+	/* Length till the end of VALUES clause (as an Integer node) */
 	FdwModifyPrivateLen,
-	/* has-returning flag (as an integer Value node) */
+	/* has-returning flag (as a Boolean node) */
 	FdwModifyPrivateHasReturning,
 	/* Integer list of attribute numbers retrieved by RETURNING */
 	FdwModifyPrivateRetrievedAttrs
@@ -123,11 +124,11 @@ enum FdwDirectModifyPrivateIndex
 {
 	/* SQL statement to execute remotely (as a String node) */
 	FdwDirectModifyPrivateUpdateSql,
-	/* has-returning flag (as an integer Value node) */
+	/* has-returning flag (as a Boolean node) */
 	FdwDirectModifyPrivateHasReturning,
 	/* Integer list of attribute numbers retrieved by RETURNING */
 	FdwDirectModifyPrivateRetrievedAttrs,
-	/* set-processed flag (as an integer Value node) */
+	/* set-processed flag (as a Boolean node) */
 	FdwDirectModifyPrivateSetProcessed
 };
 
@@ -281,9 +282,9 @@ typedef struct PgFdwAnalyzeState
  */
 enum FdwPathPrivateIndex
 {
-	/* has-final-sort flag (as an integer Value node) */
+	/* has-final-sort flag (as a Boolean node) */
 	FdwPathPrivateHasFinalSort,
-	/* has-limit flag (as an integer Value node) */
+	/* has-limit flag (as a Boolean node) */
 	FdwPathPrivateHasLimit
 };
 
@@ -1242,10 +1243,10 @@ postgresGetForeignPlan(PlannerInfo *root,
 	 */
 	if (best_path->fdw_private)
 	{
-		has_final_sort = intVal(list_nth(best_path->fdw_private,
-										 FdwPathPrivateHasFinalSort));
-		has_limit = intVal(list_nth(best_path->fdw_private,
-									FdwPathPrivateHasLimit));
+		has_final_sort = boolVal(list_nth(best_path->fdw_private,
+										  FdwPathPrivateHasFinalSort));
+		has_limit = boolVal(list_nth(best_path->fdw_private,
+									 FdwPathPrivateHasLimit));
 	}
 
 	if (IS_SIMPLE_REL(foreignrel))
@@ -1662,9 +1663,12 @@ postgresReScanForeignScan(ForeignScanState *node)
 
 	/*
 	 * If any internal parameters affecting this node have changed, we'd
-	 * better destroy and recreate the cursor.  Otherwise, rewinding it should
-	 * be good enough.  If we've only fetched zero or one batch, we needn't
-	 * even rewind the cursor, just rescan what we have.
+	 * better destroy and recreate the cursor.  Otherwise, if the remote
+	 * server is v14 or older, rewinding it should be good enough; if not,
+	 * rewind is only allowed for scrollable cursors, but we don't have a way
+	 * to check the scrollability of it, so destroy and recreate it in any
+	 * case.  If we've only fetched zero or one batch, we needn't even rewind
+	 * the cursor, just rescan what we have.
 	 */
 	if (node->ss.ps.chgParam != NULL)
 	{
@@ -1674,8 +1678,15 @@ postgresReScanForeignScan(ForeignScanState *node)
 	}
 	else if (fsstate->fetch_ct_2 > 1)
 	{
-		snprintf(sql, sizeof(sql), "MOVE BACKWARD ALL IN c%u",
-				 fsstate->cursor_number);
+		if (PQserverVersion(fsstate->conn) < 150000)
+			snprintf(sql, sizeof(sql), "MOVE BACKWARD ALL IN c%u",
+					 fsstate->cursor_number);
+		else
+		{
+			fsstate->cursor_exists = false;
+			snprintf(sql, sizeof(sql), "CLOSE c%u",
+					 fsstate->cursor_number);
+		}
 	}
 	else
 	{
@@ -1813,7 +1824,8 @@ postgresPlanForeignModify(PlannerInfo *root,
 	else if (operation == CMD_UPDATE)
 	{
 		int			col;
-		Bitmapset  *allUpdatedCols = bms_union(rte->updatedCols, rte->extraUpdatedCols);
+		RelOptInfo *rel = find_base_rel(root, resultRelation);
+		Bitmapset  *allUpdatedCols = get_rel_all_updated_cols(root, rel);
 
 		col = -1;
 		while ((col = bms_next_member(allUpdatedCols, col)) >= 0)
@@ -1888,7 +1900,7 @@ postgresPlanForeignModify(PlannerInfo *root,
 	return list_make5(makeString(sql.data),
 					  targetAttrs,
 					  makeInteger(values_end_len),
-					  makeInteger((retrieved_attrs != NIL)),
+					  makeBoolean((retrieved_attrs != NIL)),
 					  retrieved_attrs);
 }
 
@@ -1925,8 +1937,8 @@ postgresBeginForeignModify(ModifyTableState *mtstate,
 									 FdwModifyPrivateTargetAttnums);
 	values_end_len = intVal(list_nth(fdw_private,
 									 FdwModifyPrivateLen));
-	has_returning = intVal(list_nth(fdw_private,
-									FdwModifyPrivateHasReturning));
+	has_returning = boolVal(list_nth(fdw_private,
+									 FdwModifyPrivateHasReturning));
 	retrieved_attrs = (List *) list_nth(fdw_private,
 										FdwModifyPrivateRetrievedAttrs);
 
@@ -2587,9 +2599,9 @@ postgresPlanDirectModify(PlannerInfo *root,
 	 * Items in the list must match enum FdwDirectModifyPrivateIndex, above.
 	 */
 	fscan->fdw_private = list_make4(makeString(sql.data),
-									makeInteger((retrieved_attrs != NIL)),
+									makeBoolean((retrieved_attrs != NIL)),
 									retrieved_attrs,
-									makeInteger(plan->canSetTag));
+									makeBoolean(plan->canSetTag));
 
 	/*
 	 * Update the foreign-join-related fields.
@@ -2687,12 +2699,12 @@ postgresBeginDirectModify(ForeignScanState *node, int eflags)
 	/* Get private info created by planner functions. */
 	dmstate->query = strVal(list_nth(fsplan->fdw_private,
 									 FdwDirectModifyPrivateUpdateSql));
-	dmstate->has_returning = intVal(list_nth(fsplan->fdw_private,
-											 FdwDirectModifyPrivateHasReturning));
+	dmstate->has_returning = boolVal(list_nth(fsplan->fdw_private,
+											  FdwDirectModifyPrivateHasReturning));
 	dmstate->retrieved_attrs = (List *) list_nth(fsplan->fdw_private,
 												 FdwDirectModifyPrivateRetrievedAttrs);
-	dmstate->set_processed = intVal(list_nth(fsplan->fdw_private,
-											 FdwDirectModifyPrivateSetProcessed));
+	dmstate->set_processed = boolVal(list_nth(fsplan->fdw_private,
+											  FdwDirectModifyPrivateSetProcessed));
 
 	/* Create context for per-tuple temp workspace. */
 	dmstate->temp_cxt = AllocSetContextCreate(estate->es_query_cxt,
@@ -2876,7 +2888,7 @@ postgresExplainForeignScan(ForeignScanState *node, ExplainState *es)
 				{
 					char	   *namespace;
 
-					namespace = get_namespace_name(get_rel_namespace(rte->relid));
+					namespace = get_namespace_name_or_temp(get_rel_namespace(rte->relid));
 					appendStringInfo(relations, "%s.%s",
 									 quote_identifier(namespace),
 									 quote_identifier(relname));
@@ -5186,7 +5198,7 @@ analyze_row_processor(PGresult *res, int row, PgFdwAnalyzeState *astate)
 		if (astate->rowstoskip <= 0)
 		{
 			/* Choose a random reservoir element to replace. */
-			pos = (int) (targrows * sampler_random_fract(astate->rstate.randstate));
+			pos = (int) (targrows * sampler_random_fract(&astate->rstate.randstate));
 			Assert(pos >= 0 && pos < targrows);
 			heap_freetuple(astate->rows[pos]);
 		}
@@ -5316,45 +5328,41 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 							   "SELECT relname, "
 							   "  attname, "
 							   "  format_type(atttypid, atttypmod), "
-							   "  attnotnull, ");
+							   "  attnotnull, "
+							   "  pg_get_expr(adbin, adrelid), ");
 
 		/* Generated columns are supported since Postgres 12 */
 		if (PQserverVersion(conn) >= 120000)
 			appendStringInfoString(&buf,
-								   "  attgenerated, "
-								   "  pg_get_expr(adbin, adrelid), ");
+								   "  attgenerated, ");
 		else
 			appendStringInfoString(&buf,
-								   "  NULL, "
-								   "  pg_get_expr(adbin, adrelid), ");
+								   "  NULL, ");
 
 		if (import_collate)
 			appendStringInfoString(&buf,
 								   "  collname, "
-								   "  collnsp.nspname "
-								   "FROM pg_class c "
-								   "  JOIN pg_namespace n ON "
-								   "    relnamespace = n.oid "
-								   "  LEFT JOIN pg_attribute a ON "
-								   "    attrelid = c.oid AND attnum > 0 "
-								   "      AND NOT attisdropped "
-								   "  LEFT JOIN pg_attrdef ad ON "
-								   "    adrelid = c.oid AND adnum = attnum "
+								   "  collnsp.nspname ");
+		else
+			appendStringInfoString(&buf,
+								   "  NULL, NULL ");
+
+		appendStringInfoString(&buf,
+							   "FROM pg_class c "
+							   "  JOIN pg_namespace n ON "
+							   "    relnamespace = n.oid "
+							   "  LEFT JOIN pg_attribute a ON "
+							   "    attrelid = c.oid AND attnum > 0 "
+							   "      AND NOT attisdropped "
+							   "  LEFT JOIN pg_attrdef ad ON "
+							   "    adrelid = c.oid AND adnum = attnum ");
+
+		if (import_collate)
+			appendStringInfoString(&buf,
 								   "  LEFT JOIN pg_collation coll ON "
 								   "    coll.oid = attcollation "
 								   "  LEFT JOIN pg_namespace collnsp ON "
 								   "    collnsp.oid = collnamespace ");
-		else
-			appendStringInfoString(&buf,
-								   "  NULL, NULL "
-								   "FROM pg_class c "
-								   "  JOIN pg_namespace n ON "
-								   "    relnamespace = n.oid "
-								   "  LEFT JOIN pg_attribute a ON "
-								   "    attrelid = c.oid AND attnum > 0 "
-								   "      AND NOT attisdropped "
-								   "  LEFT JOIN pg_attrdef ad ON "
-								   "    adrelid = c.oid AND adnum = attnum ");
 
 		appendStringInfoString(&buf,
 							   "WHERE c.relkind IN ("
@@ -5434,9 +5442,9 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 				attname = PQgetvalue(res, i, 1);
 				typename = PQgetvalue(res, i, 2);
 				attnotnull = PQgetvalue(res, i, 3);
-				attgenerated = PQgetisnull(res, i, 4) ? (char *) NULL :
+				attdefault = PQgetisnull(res, i, 4) ? (char *) NULL :
 					PQgetvalue(res, i, 4);
-				attdefault = PQgetisnull(res, i, 5) ? (char *) NULL :
+				attgenerated = PQgetisnull(res, i, 5) ? (char *) NULL :
 					PQgetvalue(res, i, 5);
 				collname = PQgetisnull(res, i, 6) ? (char *) NULL :
 					PQgetvalue(res, i, 6);
@@ -6653,7 +6661,7 @@ add_foreign_ordered_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Build the fdw_private list that will be used by postgresGetForeignPlan.
 	 * Items in the list must match order in enum FdwPathPrivateIndex.
 	 */
-	fdw_private = list_make2(makeInteger(true), makeInteger(false));
+	fdw_private = list_make2(makeBoolean(true), makeBoolean(false));
 
 	/* Create foreign ordering path */
 	ordered_path = create_foreign_upper_path(root,
@@ -6842,6 +6850,20 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		return;
 
 	/*
+	 * If the query has FETCH FIRST .. WITH TIES, 1) it must have ORDER BY as
+	 * well, which is used to determine which additional rows tie for the last
+	 * place in the result set, and 2) ORDER BY must already have been
+	 * determined to be safe to push down before we get here.  So in that case
+	 * the FETCH clause is safe to push down with ORDER BY if the remote
+	 * server is v13 or later, but if not, the remote query will fail entirely
+	 * for lack of support for it.  Since we do not currently have a way to do
+	 * a remote-version check (without accessing the remote server), disable
+	 * pushing the FETCH clause for now.
+	 */
+	if (parse->limitOption == LIMIT_OPTION_WITH_TIES)
+		return;
+
+	/*
 	 * Also, the LIMIT/OFFSET cannot be pushed down, if their expressions are
 	 * not safe to remote.
 	 */
@@ -6884,8 +6906,8 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Build the fdw_private list that will be used by postgresGetForeignPlan.
 	 * Items in the list must match order in enum FdwPathPrivateIndex.
 	 */
-	fdw_private = list_make2(makeInteger(has_final_sort),
-							 makeInteger(extra->limit_needed));
+	fdw_private = list_make2(makeBoolean(has_final_sort),
+							 makeBoolean(extra->limit_needed));
 
 	/*
 	 * Create foreign final path; this gets rid of a no-longer-needed outer
@@ -6970,14 +6992,16 @@ postgresForeignAsyncConfigureWait(AsyncRequest *areq)
 	{
 		/*
 		 * This is the case when the in-process request was made by another
-		 * Append.  Note that it might be useless to process the request,
-		 * because the query might not need tuples from that Append anymore.
-		 * If there are any child subplans of the same parent that are ready
-		 * for new requests, skip the given request.  Likewise, if there are
-		 * any configured events other than the postmaster death event, skip
-		 * it.  Otherwise, process the in-process request, then begin a fetch
-		 * to configure the event below, because we might otherwise end up
-		 * with no configured events other than the postmaster death event.
+		 * Append.  Note that it might be useless to process the request made
+		 * by that Append, because the query might not need tuples from that
+		 * Append anymore; so we avoid processing it to begin a fetch for the
+		 * given request if possible.  If there are any child subplans of the
+		 * same parent that are ready for new requests, skip the given
+		 * request.  Likewise, if there are any configured events other than
+		 * the postmaster death event, skip it.  Otherwise, process the
+		 * in-process request, then begin a fetch to configure the event
+		 * below, because we might otherwise end up with no configured events
+		 * other than the postmaster death event.
 		 */
 		if (!bms_is_empty(requestor->as_needrequest))
 			return;
@@ -7147,7 +7171,7 @@ void
 process_pending_request(AsyncRequest *areq)
 {
 	ForeignScanState *node = (ForeignScanState *) areq->requestee;
-	PgFdwScanState *fsstate PG_USED_FOR_ASSERTS_ONLY = (PgFdwScanState *) node->fdw_state;
+	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
 
 	/* The request would have been pending for a callback */
 	Assert(areq->callback_pending);

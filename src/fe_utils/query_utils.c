@@ -21,7 +21,7 @@
  *
  * Facilities for frontend code to query a databases.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/fe_utils/query_utils.c
@@ -50,7 +50,7 @@ executeQuery(PGconn *conn, const char *query, bool echo)
 		PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
 		pg_log_error("query failed: %s", PQerrorMessage(conn));
-		pg_log_info("query was: %s", query);
+		pg_log_error_detail("Query was: %s", query);
 		PQfinish(conn);
 		exit(1);
 	}
@@ -75,7 +75,7 @@ executeCommand(PGconn *conn, const char *query, bool echo)
 		PQresultStatus(res) != PGRES_COMMAND_OK)
 	{
 		pg_log_error("query failed: %s", PQerrorMessage(conn));
-		pg_log_info("query was: %s", query);
+		pg_log_error_detail("Query was: %s", query);
 		PQfinish(conn);
 		exit(1);
 	}

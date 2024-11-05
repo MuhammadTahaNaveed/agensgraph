@@ -17,13 +17,13 @@ dnl Read the Autoconf manual for details.
 dnl
 m4_pattern_forbid(^PGAC_)dnl to catch undefined macros
 
-AC_INIT([PostgreSQL], [14.6], [pgsql-bugs@lists.postgresql.org], [], [https://www.postgresql.org/])
+AC_INIT([PostgreSQL], [15.8], [pgsql-bugs@lists.postgresql.org], [], [https://www.postgresql.org/])
 
 m4_if(m4_defn([m4_PACKAGE_VERSION]), [2.69], [], [m4_fatal([Autoconf version 2.69 is required.
 Untested combinations of 'autoconf' and PostgreSQL versions are not
 recommended.  You can remove the check from 'configure.ac' but it is then
 your responsibility whether the result works or not.])])
-AC_COPYRIGHT([Copyright (c) 1996-2021, PostgreSQL Global Development Group])
+AC_COPYRIGHT([Copyright (c) 1996-2022, PostgreSQL Global Development Group])
 AC_CONFIG_SRCDIR([src/backend/access/common/heaptuple.c])
 AC_CONFIG_AUX_DIR(config)
 AC_PREFIX_DEFAULT(/usr/local/pgsql)
@@ -42,10 +42,10 @@ PGAC_ARG_REQ(with, extra-version, [STRING], [append STRING to version],
              [PG_VERSION="$PACKAGE_VERSION"])
 AC_DEFINE_UNQUOTED(PG_VERSION, "$PG_VERSION", [PostgreSQL version as a string])
 
-[AG_VERSION=2.14.0]
+[AG_VERSION=2.15.0]
 AC_DEFINE_UNQUOTED(AG_VERSION, "$AG_VERSION", [AgensGraph version as a string])
 
-[AG_COMP_VERSION=2.14]
+[AG_COMP_VERSION=2.15]
 AC_DEFINE_UNQUOTED(AG_COMP_VERSION, "$AG_COMP_VERSION", [AgensGraph compatible version as a string])
 
 [AG_GIT_REVISION=`git rev-parse HEAD`]
@@ -111,6 +111,9 @@ AC_SUBST(PORTNAME)
 # when it's executed.
 need_tas=no
 tas_file=dummy.s
+
+# Default, works for most platforms, override in template file if needed
+DLSUFFIX=".so"
 
 
 
@@ -569,6 +572,12 @@ if test "$GCC" = yes -a "$ICC" = no; then
   if test -n "$NOT_THE_CFLAGS"; then
     CFLAGS="$CFLAGS -Wno-stringop-truncation"
   fi
+  # Suppress clang 16's strict warnings about function casts
+  NOT_THE_CFLAGS=""
+  PGAC_PROG_CC_VAR_OPT(NOT_THE_CFLAGS, [-Wcast-function-type-strict])
+  if test -n "$NOT_THE_CFLAGS"; then
+    CFLAGS="$CFLAGS -Wno-cast-function-type-strict"
+  fi
 elif test "$ICC" = yes; then
   # Intel's compiler has a bug/misoptimization in checking for
   # division by NAN (NaN == 0), -mp1 fixes it, so add it to the CFLAGS.
@@ -670,6 +679,12 @@ if test "$enable_profiling" = yes && test "$ac_cv_prog_cc_g" = yes; then
   fi
 fi
 
+# On Solaris, we need this #define to get POSIX-conforming versions
+# of many interfaces (sigwait, getpwuid_r, ...).
+if test "$PORTNAME" = "solaris"; then
+  CPPFLAGS="$CPPFLAGS -D_POSIX_PTHREAD_SEMANTICS"
+fi
+
 # We already have this in Makefile.win32, but configure needs it too
 if test "$PORTNAME" = "win32"; then
   CPPFLAGS="$CPPFLAGS -I$srcdir/src/include/port/win32"
@@ -738,6 +753,10 @@ else
   TAS=""
 fi
 AC_SUBST(TAS)
+
+AC_SUBST(DLSUFFIX)dnl
+AC_DEFINE_UNQUOTED([DLSUFFIX], ["$DLSUFFIX"],
+                   [Define to the file name extension of dynamically-loadable modules.])
 
 #
 # Set up pkg_config in case we need it below
@@ -1075,6 +1094,30 @@ if test "$with_lz4" = yes; then
 fi
 
 #
+# ZSTD
+#
+AC_MSG_CHECKING([whether to build with ZSTD support])
+PGAC_ARG_BOOL(with, zstd, no, [build with ZSTD support],
+              [AC_DEFINE([USE_ZSTD], 1, [Define to 1 to build with ZSTD support. (--with-zstd)])])
+AC_MSG_RESULT([$with_zstd])
+AC_SUBST(with_zstd)
+
+if test "$with_zstd" = yes; then
+  PKG_CHECK_MODULES(ZSTD, libzstd >= 1.4.0)
+  # We only care about -I, -D, and -L switches;
+  # note that -lzstd will be added by AC_CHECK_LIB below.
+  for pgac_option in $ZSTD_CFLAGS; do
+    case $pgac_option in
+      -I*|-D*) CPPFLAGS="$CPPFLAGS $pgac_option";;
+    esac
+  done
+  for pgac_option in $ZSTD_LIBS; do
+    case $pgac_option in
+      -L*) LDFLAGS="$LDFLAGS $pgac_option";;
+    esac
+  done
+fi
+#
 # Assignments
 #
 
@@ -1182,9 +1225,8 @@ AS_IF([test "$enable_thread_safety" = yes -a "$PORTNAME" != "win32"],
 AX_PTHREAD	# set thread flags
 
 # Some platforms use these, so just define them.  They can't hurt if they
-# are not supported.  For example, on Solaris -D_POSIX_PTHREAD_SEMANTICS
-# enables 5-arg getpwuid_r, among other things.
-PTHREAD_CFLAGS="$PTHREAD_CFLAGS -D_REENTRANT -D_THREAD_SAFE -D_POSIX_PTHREAD_SEMANTICS"
+# are not supported.
+PTHREAD_CFLAGS="$PTHREAD_CFLAGS -D_REENTRANT -D_THREAD_SAFE"
 
 # Check for *_r functions
 _CFLAGS="$CFLAGS"
@@ -1320,11 +1362,13 @@ if test "$with_ssl" = openssl ; then
   # defines OPENSSL_VERSION_NUMBER to claim version 2.0.0, even though it
   # doesn't have these OpenSSL 1.1.0 functions. So check for individual
   # functions.
-  AC_CHECK_FUNCS([OPENSSL_init_ssl BIO_get_data BIO_meth_new ASN1_STRING_get0_data HMAC_CTX_new HMAC_CTX_free])
+  AC_CHECK_FUNCS([OPENSSL_init_ssl BIO_meth_new ASN1_STRING_get0_data HMAC_CTX_new HMAC_CTX_free])
   # OpenSSL versions before 1.1.0 required setting callback functions, for
   # thread-safety. In 1.1.0, it's no longer required, and CRYPTO_lock()
   # function was removed.
   AC_CHECK_FUNCS([CRYPTO_lock])
+  # Function introduced in OpenSSL 1.1.1.
+  AC_CHECK_FUNCS([X509_get_signature_info SSL_CTX_set_num_tickets])
   AC_DEFINE([USE_OPENSSL], 1, [Define to 1 to build with OpenSSL support. (--with-ssl=openssl)])
 elif test "$with_ssl" != no ; then
   AC_MSG_ERROR([--with-ssl must specify openssl])
@@ -1345,6 +1389,10 @@ fi
 
 if test "$with_lz4" = yes ; then
   AC_CHECK_LIB(lz4, LZ4_compress_default, [], [AC_MSG_ERROR([library 'lz4' is required for LZ4 support])])
+fi
+
+if test "$with_zstd" = yes ; then
+  AC_CHECK_LIB(zstd, ZSTD_compress, [], [AC_MSG_ERROR([library 'zstd' is required for ZSTD support])])
 fi
 
 # Note: We can test for libldap_r only after we know PTHREAD_LIBS;
@@ -1433,6 +1481,7 @@ AC_CHECK_HEADERS(m4_normalize([
 	sys/epoll.h
 	sys/event.h
 	sys/ipc.h
+	sys/personality.h
 	sys/prctl.h
 	sys/procctl.h
 	sys/pstat.h
@@ -1513,8 +1562,14 @@ failure.  It is possible the compiler isn't looking in the proper directory.
 Use --without-zlib to disable zlib support.])])
 fi
 
+PGAC_PATH_PROGS(LZ4, lz4)
 if test "$with_lz4" = yes; then
-  AC_CHECK_HEADERS(lz4.h, [], [AC_MSG_ERROR([lz4.h header file is required for LZ4])])
+  AC_CHECK_HEADER(lz4.h, [], [AC_MSG_ERROR([lz4.h header file is required for LZ4])])
+fi
+
+PGAC_PATH_PROGS(ZSTD, zstd)
+if test "$with_zstd" = yes; then
+  AC_CHECK_HEADER(zstd.h, [], [AC_MSG_ERROR([zstd.h header file is required for ZSTD])])
 fi
 
 if test "$with_gssapi" = yes ; then
@@ -1618,6 +1673,7 @@ PGAC_C_BUILTIN_UNREACHABLE
 PGAC_C_COMPUTED_GOTO
 PGAC_STRUCT_TIMEZONE
 PGAC_UNION_SEMUN
+AC_CHECK_TYPES(socklen_t, [], [], [#include <sys/socket.h>])
 PGAC_STRUCT_SOCKADDR_UN
 PGAC_STRUCT_SOCKADDR_STORAGE
 PGAC_STRUCT_SOCKADDR_STORAGE_MEMBERS
@@ -1752,7 +1808,6 @@ fi
 ##
 
 PGAC_VAR_INT_TIMEZONE
-AC_FUNC_ACCEPT_ARGTYPES
 PGAC_FUNC_GETTIMEOFDAY_1ARG
 PGAC_FUNC_WCSTOMBS_L
 
@@ -1771,6 +1826,7 @@ AC_CHECK_FUNCS(m4_normalize([
 	getifaddrs
 	getpeerucred
 	getrlimit
+	inet_pton
 	kqueue
 	mbstowcs_l
 	memset_s
@@ -1810,6 +1866,33 @@ PGAC_CHECK_BUILTIN_FUNC_PTR([__builtin_frame_address], [0])
 # We require 64-bit fseeko() to be available, but run this check anyway
 # in case it finds that _LARGEFILE_SOURCE has to be #define'd for that.
 AC_FUNC_FSEEKO
+
+# Make sure there's a declaration for sigwait(), then make sure
+# that it conforms to the POSIX standard (there seem to still be
+# some platforms out there with pre-POSIX sigwait()).  On Solaris,
+# _POSIX_PTHREAD_SEMANTICS affects the result, but we already
+# added that to CPPFLAGS.
+AC_CHECK_DECLS(sigwait, [], [], [#include <signal.h>])
+if test "x$ac_cv_have_decl_sigwait" = xyes; then
+  AC_CACHE_CHECK([for POSIX-conforming sigwait declaration],
+    [pgac_cv_have_posix_decl_sigwait],
+    [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([
+      #include <signal.h>
+      int sigwait(const sigset_t *set, int *sig);
+      ],
+      [])],
+      [pgac_cv_have_posix_decl_sigwait=yes],
+      [pgac_cv_have_posix_decl_sigwait=no])])
+fi
+if test "x$pgac_cv_have_posix_decl_sigwait" = xyes; then
+  AC_DEFINE(HAVE_POSIX_DECL_SIGWAIT, 1,
+            [Define to 1 if you have a POSIX-conforming sigwait declaration.])
+else
+  # On non-Windows, libpq requires POSIX sigwait() for thread safety.
+  if test "$enable_thread_safety" = yes -a "$PORTNAME" != "win32"; then
+    AC_MSG_ERROR([POSIX-conforming sigwait is required to enable thread safety.])
+  fi
+fi
 
 # posix_fadvise() is a no-op on Solaris, so don't incur function overhead
 # by calling it, 2009-04-02
@@ -1864,8 +1947,6 @@ AC_REPLACE_FUNCS(m4_normalize([
 	mkdtemp
 	pread
 	pwrite
-	random
-	srandom
 	strlcat
 	strlcpy
 	strnlen
@@ -1938,8 +2019,10 @@ if test "$PORTNAME" = "win32"; then
   AC_LIBOBJ(kill)
   AC_LIBOBJ(open)
   AC_LIBOBJ(system)
+  AC_LIBOBJ(win32common)
   AC_LIBOBJ(win32env)
   AC_LIBOBJ(win32error)
+  AC_LIBOBJ(win32ntdll)
   AC_LIBOBJ(win32security)
   AC_LIBOBJ(win32setlocale)
   AC_LIBOBJ(win32stat)
@@ -2009,8 +2092,14 @@ LIBS="$LIBS_including_readline"
 
 if test "$with_readline" = yes; then
   PGAC_READLINE_VARIABLES
-  AC_CHECK_FUNCS([rl_completion_matches rl_filename_completion_function rl_reset_screen_size])
-  AC_CHECK_FUNCS([append_history history_truncate_file])
+  AC_CHECK_FUNCS(m4_normalize([
+	append_history
+	history_truncate_file
+	rl_completion_matches
+	rl_filename_completion_function
+	rl_reset_screen_size
+	rl_variable_bind
+  ]))
 fi
 
 
@@ -2394,6 +2483,7 @@ if test "$enable_tap_tests" = yes; then
   # AX_PROG_PERL_MODULES here, but prove might be part of a different Perl
   # installation than perl, eg on MSys, so we have to check using prove.
   AC_MSG_CHECKING(for Perl modules required for TAP tests)
+  __CONFIG_HOST_OS__=$host_os; export __CONFIG_HOST_OS__
   [modulestderr=`"$PROVE" "$srcdir/config/check_modules.pl" 2>&1 >/dev/null`]
   if test $? -eq 0; then
     # log the module version details, but don't show them interactively

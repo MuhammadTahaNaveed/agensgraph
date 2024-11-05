@@ -21,11 +21,11 @@
  * wait_event.c
  *	  Wait event reporting infrastructure.
  *
- * Copyright (c) 2001-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2022, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
- *	  src/backend/postmaster/wait_event.c
+ *	  src/backend/utils/activity/wait_event.c
  *
  * NOTES
  *
@@ -249,9 +249,6 @@ pgstat_get_wait_activity(WaitEventActivity w)
 		case WAIT_EVENT_LOGICAL_LAUNCHER_MAIN:
 			event_name = "LogicalLauncherMain";
 			break;
-		case WAIT_EVENT_PGSTAT_MAIN:
-			event_name = "PgStatMain";
-			break;
 		case WAIT_EVENT_RECOVERY_WAL_STREAM:
 			event_name = "RecoveryWalStream";
 			break;
@@ -331,6 +328,12 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 	{
 		case WAIT_EVENT_APPEND_READY:
 			event_name = "AppendReady";
+			break;
+		case WAIT_EVENT_ARCHIVE_CLEANUP_COMMAND:
+			event_name = "ArchiveCleanupCommand";
+			break;
+		case WAIT_EVENT_ARCHIVE_COMMAND:
+			event_name = "ArchiveCommand";
 			break;
 		case WAIT_EVENT_BACKEND_TERMINATION:
 			event_name = "BackendTermination";
@@ -446,6 +449,9 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_RECOVERY_CONFLICT_TABLESPACE:
 			event_name = "RecoveryConflictTablespace";
 			break;
+		case WAIT_EVENT_RECOVERY_END_COMMAND:
+			event_name = "RecoveryEndCommand";
+			break;
 		case WAIT_EVENT_RECOVERY_PAUSE:
 			event_name = "RecoveryPause";
 			break;
@@ -454,6 +460,9 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 			break;
 		case WAIT_EVENT_REPLICATION_SLOT_DROP:
 			event_name = "ReplicationSlotDrop";
+			break;
+		case WAIT_EVENT_RESTORE_COMMAND:
+			event_name = "RestoreCommand";
 			break;
 		case WAIT_EVENT_SAFE_SNAPSHOT:
 			event_name = "SafeSnapshot";
@@ -510,6 +519,9 @@ pgstat_get_wait_timeout(WaitEventTimeout w)
 		case WAIT_EVENT_VACUUM_DELAY:
 			event_name = "VacuumDelay";
 			break;
+		case WAIT_EVENT_VACUUM_TRUNCATE:
+			event_name = "VacuumTruncate";
+			break;
 			/* no default case, so that compiler will warn */
 	}
 
@@ -531,6 +543,12 @@ pgstat_get_wait_io(WaitEventIO w)
 	{
 		case WAIT_EVENT_BASEBACKUP_READ:
 			event_name = "BaseBackupRead";
+			break;
+		case WAIT_EVENT_BASEBACKUP_SYNC:
+			event_name = "BaseBackupSync";
+			break;
+		case WAIT_EVENT_BASEBACKUP_WRITE:
+			event_name = "BaseBackupWrite";
 			break;
 		case WAIT_EVENT_BUFFILE_READ:
 			event_name = "BufFileRead";
@@ -703,6 +721,12 @@ pgstat_get_wait_io(WaitEventIO w)
 		case WAIT_EVENT_TWOPHASE_FILE_WRITE:
 			event_name = "TwophaseFileWrite";
 			break;
+		case WAIT_EVENT_VERSION_FILE_SYNC:
+			event_name = "VersionFileSync";
+			break;
+		case WAIT_EVENT_VERSION_FILE_WRITE:
+			event_name = "VersionFileWrite";
+			break;
 		case WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ:
 			event_name = "WALSenderTimelineHistoryRead";
 			break;
@@ -738,18 +762,6 @@ pgstat_get_wait_io(WaitEventIO w)
 			break;
 		case WAIT_EVENT_WAL_WRITE:
 			event_name = "WALWrite";
-			break;
-		case WAIT_EVENT_LOGICAL_CHANGES_READ:
-			event_name = "LogicalChangesRead";
-			break;
-		case WAIT_EVENT_LOGICAL_CHANGES_WRITE:
-			event_name = "LogicalChangesWrite";
-			break;
-		case WAIT_EVENT_LOGICAL_SUBXACT_READ:
-			event_name = "LogicalSubxactRead";
-			break;
-		case WAIT_EVENT_LOGICAL_SUBXACT_WRITE:
-			event_name = "LogicalSubxactWrite";
 			break;
 
 			/* no default case, so that compiler will warn */

@@ -22,7 +22,7 @@
  * nodeCustom.c
  *		Routines to handle execution of custom scan node
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * ------------------------------------------------------------------------
@@ -50,7 +50,7 @@ ExecInitCustomScan(CustomScan *cscan, EState *estate, int eflags)
 	CustomScanState *css;
 	Relation	scan_rel = NULL;
 	Index		scanrelid = cscan->scan.scanrelid;
-	Index		tlistvarno;
+	int			tlistvarno;
 
 	/*
 	 * Allocate the CustomScanState object.  We let the custom scan provider

@@ -1,15 +1,16 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # Do basic sanity checks supported by pg_checksums using
 # an initialized cluster.
 
 use strict;
 use warnings;
-use PostgresNode;
-use TestLib;
+use Config;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 
-use Test::More tests => 63;
+use Test::More;
 
 
 # Utility routine to create and check a table with corrupted checksums
@@ -86,7 +87,7 @@ sub check_relation_corruption
 }
 
 # Initialize node with checksums disabled.
-my $node = get_new_node('node_checksum');
+my $node = PostgreSQL::Test::Cluster->new('node_checksum');
 $node->init();
 my $pgdata = $node->data_dir;
 
@@ -113,6 +114,12 @@ mkdir "$pgdata/global/pgsql_tmp";
 append_to_file "$pgdata/global/pgsql_tmp/1.1",        "foo";
 append_to_file "$pgdata/global/pg_internal.init",     "foo";
 append_to_file "$pgdata/global/pg_internal.init.123", "foo";
+
+# These are non-postgres macOS files, which should be ignored by the scan.
+# Only perform this test on non-macOS systems though as creating incorrect
+# system files may have side effects on macOS.
+append_to_file "$pgdata/global/.DS_Store", "foo"
+	unless ($Config{osname} eq 'darwin');
 
 # Enable checksums.
 command_ok([ 'pg_checksums', '--enable', '--no-sync', '-D', $pgdata ],
@@ -171,6 +178,22 @@ command_fails(
 command_fails(
 	[ 'pg_checksums', '--enable', '--filenode', '1234', '-D', $pgdata ],
 	"fails when relfilenodes are requested and action is --enable");
+
+# Test postgres -C for an offline cluster.
+# Run-time GUCs are safe to query here.  Note that a lock file is created,
+# then removed, leading to an extra LOG entry showing in stderr.  This uses
+# log_min_messages=fatal to remove any noise.  This test uses a startup
+# wrapped with pg_ctl to allow the case where this runs under a privileged
+# account on Windows.
+command_checks_all(
+	[
+		'pg_ctl', 'start', '-D', $pgdata, '-s', '-o',
+		'-C data_checksums -c log_min_messages=fatal'
+	],
+	1,
+	[qr/^on$/],
+	[qr/could not start server/],
+	'data_checksums=on is reported on an offline cluster');
 
 # Checks cannot happen with an online cluster
 $node->start;
@@ -233,3 +256,5 @@ fail_corrupt($node, "99990_vm");
 fail_corrupt($node, "99990_init.123");
 fail_corrupt($node, "99990_fsm.123");
 fail_corrupt($node, "99990_vm.123");
+
+done_testing();

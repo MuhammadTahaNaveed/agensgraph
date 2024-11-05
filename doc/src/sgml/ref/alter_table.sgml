@@ -75,6 +75,7 @@ ALTER TABLE [ IF EXISTS ] <replaceable class="parameter">name</replaceable>
     CLUSTER ON <replaceable class="parameter">index_name</replaceable>
     SET WITHOUT CLUSTER
     SET WITHOUT OIDS
+    SET ACCESS METHOD <replaceable class="parameter">new_access_method</replaceable>
     SET TABLESPACE <replaceable class="parameter">new_tablespace</replaceable>
     SET { LOGGED | UNLOGGED }
     SET ( <replaceable class="parameter">storage_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )
@@ -102,7 +103,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
   DEFAULT <replaceable>default_expr</replaceable> |
   GENERATED ALWAYS AS ( <replaceable>generation_expr</replaceable> ) STORED |
   GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY [ ( <replaceable>sequence_options</replaceable> ) ] |
-  UNIQUE <replaceable class="parameter">index_parameters</replaceable> |
+  UNIQUE [ NULLS [ NOT ] DISTINCT ] <replaceable class="parameter">index_parameters</replaceable> |
   PRIMARY KEY <replaceable class="parameter">index_parameters</replaceable> |
   REFERENCES <replaceable class="parameter">reftable</replaceable> [ ( <replaceable class="parameter">refcolumn</replaceable> ) ] [ MATCH FULL | MATCH PARTIAL | MATCH SIMPLE ]
     [ ON DELETE <replaceable class="parameter">referential_action</replaceable> ] [ ON UPDATE <replaceable class="parameter">referential_action</replaceable> ] }
@@ -112,7 +113,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
 
 [ CONSTRAINT <replaceable class="parameter">constraint_name</replaceable> ]
 { CHECK ( <replaceable class="parameter">expression</replaceable> ) [ NO INHERIT ] |
-  UNIQUE ( <replaceable class="parameter">column_name</replaceable> [, ... ] ) <replaceable class="parameter">index_parameters</replaceable> |
+  UNIQUE [ NULLS [ NOT ] DISTINCT ] ( <replaceable class="parameter">column_name</replaceable> [, ... ] ) <replaceable class="parameter">index_parameters</replaceable> |
   PRIMARY KEY ( <replaceable class="parameter">column_name</replaceable> [, ... ] ) <replaceable class="parameter">index_parameters</replaceable> |
   EXCLUDE [ USING <replaceable class="parameter">index_method</replaceable> ] ( <replaceable class="parameter">exclude_element</replaceable> WITH <replaceable class="parameter">operator</replaceable> [, ... ] ) <replaceable class="parameter">index_parameters</replaceable> [ WHERE ( <replaceable class="parameter">predicate</replaceable> ) ] |
   FOREIGN KEY ( <replaceable class="parameter">column_name</replaceable> [, ... ] ) REFERENCES <replaceable class="parameter">reftable</replaceable> [ ( <replaceable class="parameter">refcolumn</replaceable> [, ... ] ) ]
@@ -133,7 +134,11 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
 
 <phrase><replaceable class="parameter">exclude_element</replaceable> in an <literal>EXCLUDE</literal> constraint is:</phrase>
 
-{ <replaceable class="parameter">column_name</replaceable> | ( <replaceable class="parameter">expression</replaceable> ) } [ <replaceable class="parameter">opclass</replaceable> ] [ ASC | DESC ] [ NULLS { FIRST | LAST } ]
+{ <replaceable class="parameter">column_name</replaceable> | ( <replaceable class="parameter">expression</replaceable> ) } [ COLLATE <replaceable class="parameter">collation</replaceable> ] [ <replaceable class="parameter">opclass</replaceable> [ ( <replaceable class="parameter">opclass_parameter</replaceable> = <replaceable class="parameter">value</replaceable> [, ... ] ) ] ] [ ASC | DESC ] [ NULLS { FIRST | LAST } ]
+
+<phrase><replaceable class="parameter">referential_action</replaceable> in a <literal>FOREIGN KEY</literal>/<literal>REFERENCES</literal> constraint is:</phrase>
+
+{ NO ACTION | RESTRICT | CASCADE | SET NULL [ ( <replaceable class="parameter">column_name</replaceable> [, ... ] ) ] | SET DEFAULT [ ( <replaceable class="parameter">column_name</replaceable> [, ... ] ) ] }
 </synopsis>
  </refsynopsisdiv>
 
@@ -196,6 +201,12 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       cast from old data type to new.  A  <literal>USING</literal>
       clause must be provided if there is no implicit or assignment
       cast from old to new type.
+     </para>
+
+     <para>
+      When this form is used, the column's statistics are removed,
+      so running <link linkend="sql-analyze"><command>ANALYZE</command></link>
+      on the table afterwards is recommended.
      </para>
     </listitem>
    </varlistentry>
@@ -561,12 +572,12 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
      <para>
       These forms configure the firing of trigger(s) belonging to the table.
       A disabled trigger is still known to the system, but is not executed
-      when its triggering event occurs.  For a deferred trigger, the enable
+      when its triggering event occurs.  (For a deferred trigger, the enable
       status is checked when the event occurs, not when the trigger function
-      is actually executed.  One can disable or enable a single
+      is actually executed.)  One can disable or enable a single
       trigger specified by name, or all triggers on the table, or only
       user triggers (this option excludes internally generated constraint
-      triggers such as those that are used to implement foreign key
+      triggers, such as those that are used to implement foreign key
       constraints or deferrable uniqueness and exclusion constraints).
       Disabling or enabling internally generated constraint triggers
       requires superuser privileges; it should be done with caution since
@@ -588,12 +599,18 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       The effect of this mechanism is that in the default configuration,
       triggers do not fire on replicas.  This is useful because if a trigger
       is used on the origin to propagate data between tables, then the
-      replication system will also replicate the propagated data, and the
+      replication system will also replicate the propagated data; so the
       trigger should not fire a second time on the replica, because that would
       lead to duplication.  However, if a trigger is used for another purpose
       such as creating external alerts, then it might be appropriate to set it
       to <literal>ENABLE ALWAYS</literal> so that it is also fired on
       replicas.
+     </para>
+
+     <para>
+      When this command is applied to a partitioned table, the states of
+      corresponding clone triggers in the partitions are updated too,
+      unless <literal>ONLY</literal> is specified.
      </para>
 
      <para>
@@ -693,6 +710,16 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
    </varlistentry>
 
    <varlistentry>
+    <term><literal>SET ACCESS METHOD</literal></term>
+    <listitem>
+     <para>
+      This form changes the access method of the table by rewriting it. See
+      <xref linkend="tableam"/> for more information.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
     <term><literal>SET TABLESPACE</literal></term>
     <listitem>
      <para>
@@ -731,6 +758,12 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       This form changes the table from unlogged to logged or vice-versa
       (see <xref linkend="sql-createtable-unlogged"/>).  It cannot be applied
       to a temporary table.
+     </para>
+
+     <para>
+      This also changes the persistence of any sequences linked to the table
+      (for identity or serial columns).  However, it is also possible to
+      change the persistence of such sequences separately.
      </para>
     </listitem>
    </varlistentry>
@@ -861,7 +894,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
        <listitem>
         <para>
          Records the old values of the columns of the primary key, if any.
-         This is the default for non-system tables. 
+         This is the default for non-system tables.
         </para>
        </listitem>
       </varlistentry>
@@ -896,8 +929,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
         </para>
        </listitem>
       </varlistentry>
-     </variablelist>
-     </para>
+     </variablelist></para>
     </listitem>
    </varlistentry>
 
@@ -975,7 +1007,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       constraint. This does not work, however, if any of the partition keys
       is an expression and the partition does not accept
       <literal>NULL</literal> values. If attaching a list partition that will
-      not accept <literal>NULL</literal> values, also add
+      not accept <literal>NULL</literal> values, also add a
       <literal>NOT NULL</literal> constraint to the partition key column,
       unless it's an expression.
      </para>
@@ -1208,7 +1240,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
        <para>
         Disable or enable all triggers belonging to the table.
         (This requires superuser privilege if any of the triggers are
-        internally generated constraint triggers such as those that are used
+        internally generated constraint triggers, such as those that are used
         to implement foreign key constraints or deferrable uniqueness and
         exclusion constraints.)
        </para>
@@ -1220,7 +1252,7 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       <listitem>
        <para>
         Disable or enable all triggers belonging to the table except for
-        internally generated constraint triggers such as those that are used
+        internally generated constraint triggers, such as those that are used
         to implement foreign key constraints or deferrable uniqueness and
         exclusion constraints.
        </para>
@@ -1269,6 +1301,15 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
       <listitem>
        <para>
         The user name of the new owner of the table.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><replaceable class="parameter">new_access_method</replaceable></term>
+      <listitem>
+       <para>
+        The name of the access method to which the table will be converted.
        </para>
       </listitem>
      </varlistentry>
@@ -1336,7 +1377,13 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
     existing column, if the <literal>USING</literal> clause does not change
     the column contents and the old type is either binary coercible to the new
     type or an unconstrained domain over the new type, a table rewrite is not
-    needed; but any indexes on the affected columns must still be rebuilt.
+    needed. However, indexes must always be rebuilt unless the system can
+    verify that the new index would be logically equivalent to the existing
+    one.  For example, if the collation for a column has been changed, an index
+    rebuild is always required because the new sort order might be different.
+    However, in the absence of a collation change, a column can be changed
+    from <type>text</type> to <type>varchar</type> (or vice versa) without
+    rebuilding the indexes because these data types sort identically.
     Table and/or index rebuilds may take a
     significant amount of time for a large table; and will temporarily require
     as much as double the disk space.
@@ -1458,9 +1505,12 @@ WITH ( MODULUS <replaceable class="parameter">numeric_literal</replaceable>, REM
     The actions for identity columns (<literal>ADD
     GENERATED</literal>, <literal>SET</literal> etc., <literal>DROP
     IDENTITY</literal>), as well as the actions
-    <literal>TRIGGER</literal>, <literal>CLUSTER</literal>, <literal>OWNER</literal>,
+    <literal>CLUSTER</literal>, <literal>OWNER</literal>,
     and <literal>TABLESPACE</literal> never recurse to descendant tables;
     that is, they always act as though <literal>ONLY</literal> were specified.
+    Actions affecting trigger states recurse to partitions of partitioned
+    tables (unless <literal>ONLY</literal> is specified), but never to
+    traditional-inheritance descendants.
     Adding a constraint recurses only for <literal>CHECK</literal> constraints
     that are not marked <literal>NO INHERIT</literal>.
    </para>

@@ -22,7 +22,7 @@
  * jsonb_op.c
  *	 Special operators for jsonb only, used by various index access methods
  *
- * Copyright (c) 2014-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2014-2022, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -83,8 +83,9 @@ jsonb_exists_any(PG_FUNCTION_ARGS)
 			continue;
 
 		strVal.type = jbvString;
-		strVal.val.string.val = VARDATA(key_datums[i]);
-		strVal.val.string.len = VARSIZE(key_datums[i]) - VARHDRSZ;
+		/* We rely on the array elements not being toasted */
+		strVal.val.string.val = VARDATA_ANY(key_datums[i]);
+		strVal.val.string.len = VARSIZE_ANY_EXHDR(key_datums[i]);
 
 		if (findJsonbValueFromContainer(&jb->root,
 										JB_FOBJECT | JB_FARRAY,
@@ -116,8 +117,9 @@ jsonb_exists_all(PG_FUNCTION_ARGS)
 			continue;
 
 		strVal.type = jbvString;
-		strVal.val.string.val = VARDATA(key_datums[i]);
-		strVal.val.string.len = VARSIZE(key_datums[i]) - VARHDRSZ;
+		/* We rely on the array elements not being toasted */
+		strVal.val.string.val = VARDATA_ANY(key_datums[i]);
+		strVal.val.string.len = VARSIZE_ANY_EXHDR(key_datums[i]);
 
 		if (findJsonbValueFromContainer(&jb->root,
 										JB_FOBJECT | JB_FARRAY,

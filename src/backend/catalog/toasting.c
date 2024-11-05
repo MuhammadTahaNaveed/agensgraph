@@ -23,7 +23,7 @@
  *	  This file contains routines to support creation of toast tables
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -33,6 +33,7 @@
  */
 #include "postgres.h"
 
+#include "access/genam.h"
 #include "access/heapam.h"
 #include "access/toast_compression.h"
 #include "access/xact.h"
@@ -51,6 +52,7 @@
 #include "nodes/makefuncs.h"
 #include "storage/lock.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
@@ -124,10 +126,8 @@ BootstrapToastTable(char *relName, Oid toastOid, Oid toastIndexOid)
 
 	if (rel->rd_rel->relkind != RELKIND_RELATION &&
 		rel->rd_rel->relkind != RELKIND_MATVIEW)
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a table or materialized view",
-						relName)));
+		elog(ERROR, "\"%s\" is not a table or materialized view",
+			 relName);
 
 	/* create_toast_table does all the work */
 	if (!create_toast_table(rel, toastOid, toastIndexOid, (Datum) 0,
@@ -322,7 +322,10 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	indexInfo->ii_ExclusionStrats = NULL;
 	indexInfo->ii_OpclassOptions = NULL;
 	indexInfo->ii_Unique = true;
+	indexInfo->ii_NullsNotDistinct = false;
 	indexInfo->ii_ReadyForInserts = true;
+	indexInfo->ii_CheckedUnchanged = false;
+	indexInfo->ii_IndexUnchanged = false;
 	indexInfo->ii_Concurrent = false;
 	indexInfo->ii_BrokenHotChain = false;
 	indexInfo->ii_ParallelWorkers = 0;
@@ -355,21 +358,36 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	 */
 	class_rel = table_open(RelationRelationId, RowExclusiveLock);
 
-	reltup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relOid));
-	if (!HeapTupleIsValid(reltup))
-		elog(ERROR, "cache lookup failed for relation %u", relOid);
-
-	((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid;
-
 	if (!IsBootstrapProcessingMode())
 	{
 		/* normal case, use a transactional update */
+		reltup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relOid));
+		if (!HeapTupleIsValid(reltup))
+			elog(ERROR, "cache lookup failed for relation %u", relOid);
+
+		((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid;
+
 		CatalogTupleUpdate(class_rel, &reltup->t_self, reltup);
 	}
 	else
 	{
 		/* While bootstrapping, we cannot UPDATE, so overwrite in-place */
-		heap_inplace_update(class_rel, reltup);
+
+		ScanKeyData key[1];
+		void	   *state;
+
+		ScanKeyInit(&key[0],
+					Anum_pg_class_oid,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(relOid));
+		systable_inplace_update_begin(class_rel, ClassOidIndexId, true,
+									  NULL, 1, key, &reltup, &state);
+		if (!HeapTupleIsValid(reltup))
+			elog(ERROR, "cache lookup failed for relation %u", relOid);
+
+		((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid;
+
+		systable_inplace_update_finish(state, reltup);
 	}
 
 	heap_freetuple(reltup);

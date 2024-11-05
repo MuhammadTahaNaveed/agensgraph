@@ -194,8 +194,9 @@ make check-world -j8 >/dev/null
    </listitem>
    <listitem>
     <para>
-     Regression tests for the ECPG interface library,
-     located in <filename>src/interfaces/ecpg/test</filename>.
+     Regression tests for the interface libraries,
+     located in <filename>src/interfaces/libpq/test</filename> and
+     <filename>src/interfaces/ecpg/test</filename>.
     </para>
    </listitem>
    <listitem>
@@ -250,11 +251,11 @@ make check-world -j8 >/dev/null
 
   <para>
    Some test suites are not run by default, either because they are not secure
-   to run on a multiuser system or because they require special software.  You
-   can decide which test suites to run additionally by setting the
-   <command>make</command> or environment variable
-   <varname>PG_TEST_EXTRA</varname> to a whitespace-separated list, for
-   example:
+   to run on a multiuser system, because they require special software or
+   because they are resource intensive.  You can decide which test suites to
+   run additionally by setting the <command>make</command> or environment
+   variable <varname>PG_TEST_EXTRA</varname> to a whitespace-separated list,
+   for example:
 <programlisting>
 make check-world PG_TEST_EXTRA='kerberos ldap ssl'
 </programlisting>
@@ -286,6 +287,17 @@ make check-world PG_TEST_EXTRA='kerberos ldap ssl'
      <listitem>
       <para>
        Runs the test suite under <filename>src/test/ssl</filename>.  This opens TCP/IP listen sockets.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>wal_consistency_checking</literal></term>
+     <listitem>
+      <para>
+       Uses <literal>wal_consistency_checking=all</literal> while running
+       certain tests under <filename>src/test/recovery</filename>.  Not
+       enabled by default because it is resource intensive.
       </para>
      </listitem>
     </varlistentry>
@@ -390,52 +402,6 @@ make check EXTRA_REGRESS_OPTS="--temp-config=test_postgresql.conf"
 make check EXTRA_TESTS=numeric_big
 </screen>
    </para>
-  </sect2>
-
-  <sect2>
-   <title>Testing Hot Standby</title>
-
-  <para>
-   The source distribution also contains regression tests for the static
-   behavior of Hot Standby. These tests require a running primary server
-   and a running standby server that is accepting new WAL changes from the
-   primary (using either file-based log shipping or streaming replication).
-   Those servers are not automatically created for you, nor is replication
-   setup documented here. Please check the various sections of the
-   documentation devoted to the required commands and related issues.
-  </para>
-
-  <para>
-   To run the Hot Standby tests, first create a database
-   called <literal>regression</literal> on the primary:
-<screen>
-psql -h primary -c "CREATE DATABASE regression"
-</screen>
-   Next, run the preparatory script
-   <filename>src/test/regress/sql/hs_primary_setup.sql</filename>
-   on the primary in the regression database, for example:
-<screen>
-psql -h primary -f src/test/regress/sql/hs_primary_setup.sql regression
-</screen>
-   Allow these changes to propagate to the standby.
-  </para>
-
-  <para>
-   Now arrange for the default database connection to be to the standby
-   server under test (for example, by setting the <envar>PGHOST</envar> and
-   <envar>PGPORT</envar> environment variables).
-   Finally, run <literal>make standbycheck</literal> in the regression directory:
-<screen>
-cd src/test/regress
-make standbycheck
-</screen>
-  </para>
-
-  <para>
-   Some extreme behaviors can also be generated on the primary using the
-   script <filename>src/test/regress/sql/hs_primary_extremes.sql</filename>
-   to allow the behavior of the standby to be tested.
-  </para>
   </sect2>
   </sect1>
 
@@ -555,11 +521,11 @@ make check NO_LOCALE=1
     <para>
      Most of the date and time results are dependent on the time zone
      environment.  The reference files are generated for time zone
-     <literal>PST8PDT</literal> (Berkeley, California), and there will be
+     <literal>America/Los_Angeles</literal>, and there will be
      apparent failures if the tests are not run with that time zone setting.
      The regression test driver sets environment variable
-     <envar>PGTZ</envar> to <literal>PST8PDT</literal>, which normally
-     ensures proper results.
+     <envar>PGTZ</envar> to <literal>America/Los_Angeles</literal>,
+     which normally ensures proper results.
     </para>
    </sect2>
 

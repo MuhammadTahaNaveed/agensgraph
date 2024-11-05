@@ -23,7 +23,7 @@
  *		Functions for handling locale-related info
  *
  *
- * Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Copyright (c) 1996-2022, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -297,7 +297,6 @@ win32_langinfo(const char *ctype)
 					strcpy(r, codepage);
 			}
 		}
-
 	}
 #endif
 

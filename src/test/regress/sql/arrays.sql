@@ -2,6 +2,9 @@
 -- ARRAYS
 --
 
+-- directory paths are passed to us in environment variables
+\getenv abs_srcdir PG_ABS_SRCDIR
+
 CREATE TABLE arrtest (
 	a 			int2[],
 	b 			int4[][][],
@@ -11,6 +14,16 @@ CREATE TABLE arrtest (
 	f			char(5)[],
 	g			varchar(5)[]
 );
+
+CREATE TABLE array_op_test (
+	seqno		int4,
+	i			int4[],
+	t			text[]
+);
+
+\set filename :abs_srcdir '/data/array.data'
+COPY array_op_test FROM :'filename';
+ANALYZE array_op_test;
 
 --
 -- only the 'e' array is 0-based, the others are 1-based.
@@ -152,6 +165,10 @@ SELECT * FROM arrtest_s;
 UPDATE arrtest_s SET a[:] = '{23, 24, 25}';  -- fail, too small
 INSERT INTO arrtest_s VALUES(NULL, NULL);
 UPDATE arrtest_s SET a[:] = '{11, 12, 13, 14, 15}';  -- fail, no good with null
+
+-- we want to work with a point_tbl that includes a null
+CREATE TEMP TABLE point_tbl AS SELECT * FROM public.point_tbl;
+INSERT INTO POINT_TBL(f1) VALUES (NULL);
 
 -- check with fixed-length-array type, such as point
 SELECT f1[0:1] FROM POINT_TBL;
@@ -414,6 +431,27 @@ insert into arr_pk_tbl(pk, f1[1:2]) values (1, '{6,7,8}') on conflict (pk)
 -- then you didn't get an indexscan plan, and something is busted.
 reset enable_seqscan;
 reset enable_bitmapscan;
+
+-- test subscript overflow detection
+
+-- The normal error message includes a platform-dependent limit,
+-- so suppress it to avoid needing multiple expected-files.
+\set VERBOSITY sqlstate
+
+insert into arr_pk_tbl values(10, '[-2147483648:-2147483647]={1,2}');
+update arr_pk_tbl set f1[2147483647] = 42 where pk = 10;
+update arr_pk_tbl set f1[2147483646:2147483647] = array[4,2] where pk = 10;
+insert into arr_pk_tbl(pk, f1[0:2147483647]) values (2, '{}');
+insert into arr_pk_tbl(pk, f1[-2147483648:2147483647]) values (2, '{}');
+
+-- also exercise the expanded-array case
+do $$ declare a int[];
+begin
+  a := '[-2147483648:-2147483647]={1,2}'::int[];
+  a[2147483647] := 42;
+end $$;
+
+\set VERBOSITY default
 
 -- test [not] (like|ilike) (any|all) (...)
 select 'foo' like any (array['%a', '%o']); -- t

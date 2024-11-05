@@ -112,10 +112,10 @@ ExecInitGraphVLE(GraphVLE *vleplan, EState *estate, int eflags)
 	vle_state->need_new_sp_tuple = true;
 
 	vle_var_len = (A_Indices *) (VLERel(vleplan)->varlen);
-	vle_state->minimum_output_depth = ((A_Const *) vle_var_len->lidx)->val.val.ival;
+	vle_state->minimum_output_depth = ((A_Const *) vle_var_len->lidx)->val.ival.ival;
 	if (vle_var_len->uidx != NULL)
 	{
-		vle_state->maximum_output_depth = ((A_Const *) vle_var_len->uidx)->val.val.ival;
+		vle_state->maximum_output_depth = ((A_Const *) vle_var_len->uidx)->val.ival.ival;
 	}
 	else
 	{

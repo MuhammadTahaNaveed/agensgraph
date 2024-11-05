@@ -1,47 +1,92 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
-use TestLib;
-use PostgresNode;
+use PostgreSQL::Test::Utils;
+use PostgreSQL::Test::Cluster;
 use Test::More;
 
-if ($ENV{with_ldap} eq 'yes')
-{
-	plan tests => 28;
-}
-else
-{
-	plan skip_all => 'LDAP not supported by this build';
-}
 
 my ($slapd, $ldap_bin_dir, $ldap_schema_dir);
 
 $ldap_bin_dir = undef;    # usually in PATH
 
-if ($^O eq 'darwin' && -d '/usr/local/opt/openldap')
+if ($ENV{with_ldap} ne 'yes')
 {
-	# typical paths for Homebrew
-	$slapd           = '/usr/local/opt/openldap/libexec/slapd';
-	$ldap_schema_dir = '/usr/local/etc/openldap/schema';
+	plan skip_all => 'LDAP not supported by this build';
 }
-elsif ($^O eq 'darwin' && -d '/opt/local/etc/openldap')
+# Find the OpenLDAP server binary and directory containing schema
+# definition files.
+elsif ($^O eq 'darwin')
 {
-	# typical paths for MacPorts
-	$slapd           = '/opt/local/libexec/slapd';
-	$ldap_schema_dir = '/opt/local/etc/openldap/schema';
+	if (-d '/opt/homebrew/opt/openldap')
+	{
+		# typical paths for Homebrew on ARM
+		$slapd = '/opt/homebrew/opt/openldap/libexec/slapd';
+		$ldap_schema_dir = '/opt/homebrew/etc/openldap/schema';
+	}
+	elsif (-d '/usr/local/opt/openldap')
+	{
+		# typical paths for Homebrew on Intel
+		$slapd = '/usr/local/opt/openldap/libexec/slapd';
+		$ldap_schema_dir = '/usr/local/etc/openldap/schema';
+	}
+	elsif (-d '/opt/local/etc/openldap')
+	{
+		# typical paths for MacPorts
+		$slapd = '/opt/local/libexec/slapd';
+		$ldap_schema_dir = '/opt/local/etc/openldap/schema';
+	}
+	else
+	{
+		plan skip_all => "OpenLDAP server installation not found";
+	}
 }
 elsif ($^O eq 'linux')
 {
-	$slapd           = '/usr/sbin/slapd';
-	$ldap_schema_dir = '/etc/ldap/schema' if -d '/etc/ldap/schema';
-	$ldap_schema_dir = '/etc/openldap/schema' if -d '/etc/openldap/schema';
+	if (-d '/etc/ldap/schema')
+	{
+		$slapd = '/usr/sbin/slapd';
+		$ldap_schema_dir = '/etc/ldap/schema';
+	}
+	elsif (-d '/etc/openldap/schema')
+	{
+		$slapd = '/usr/sbin/slapd';
+		$ldap_schema_dir = '/etc/openldap/schema';
+	}
+	else
+	{
+		plan skip_all => "OpenLDAP server installation not found";
+	}
 }
 elsif ($^O eq 'freebsd')
 {
-	$slapd           = '/usr/local/libexec/slapd';
-	$ldap_schema_dir = '/usr/local/etc/openldap/schema';
+	if (-d '/usr/local/etc/openldap/schema')
+	{
+		$slapd = '/usr/local/libexec/slapd';
+		$ldap_schema_dir = '/usr/local/etc/openldap/schema';
+	}
+	else
+	{
+		plan skip_all => "OpenLDAP server installation not found";
+	}
+}
+elsif ($^O eq 'openbsd')
+{
+	if (-d '/usr/local/share/examples/openldap/schema')
+	{
+		$slapd = '/usr/local/libexec/slapd';
+		$ldap_schema_dir = '/usr/local/share/examples/openldap/schema';
+	}
+	else
+	{
+		plan skip_all => "OpenLDAP server installation not found";
+	}
+}
+else
+{
+	plan skip_all => "ldap tests not supported on $^O";
 }
 
 # make your own edits here
@@ -51,21 +96,21 @@ elsif ($^O eq 'freebsd')
 
 $ENV{PATH} = "$ldap_bin_dir:$ENV{PATH}" if $ldap_bin_dir;
 
-my $ldap_datadir  = "${TestLib::tmp_check}/openldap-data";
-my $slapd_certs   = "${TestLib::tmp_check}/slapd-certs";
-my $slapd_conf    = "${TestLib::tmp_check}/slapd.conf";
-my $slapd_pidfile = "${TestLib::tmp_check}/slapd.pid";
-my $slapd_logfile = "${TestLib::log_path}/slapd.log";
-my $ldap_conf     = "${TestLib::tmp_check}/ldap.conf";
+my $ldap_datadir  = "${PostgreSQL::Test::Utils::tmp_check}/openldap-data";
+my $slapd_certs   = "${PostgreSQL::Test::Utils::tmp_check}/slapd-certs";
+my $slapd_conf    = "${PostgreSQL::Test::Utils::tmp_check}/slapd.conf";
+my $slapd_pidfile = "${PostgreSQL::Test::Utils::tmp_check}/slapd.pid";
+my $slapd_logfile = "${PostgreSQL::Test::Utils::log_path}/slapd.log";
+my $ldap_conf     = "${PostgreSQL::Test::Utils::tmp_check}/ldap.conf";
 my $ldap_server   = 'localhost';
-my $ldap_port     = get_free_port();
-my $ldaps_port    = get_free_port();
+my $ldap_port     = PostgreSQL::Test::Cluster::get_free_port();
+my $ldaps_port    = PostgreSQL::Test::Cluster::get_free_port();
 my $ldap_url      = "ldap://$ldap_server:$ldap_port";
 my $ldaps_url     = "ldaps://$ldap_server:$ldaps_port";
 my $ldap_basedn   = 'dc=example,dc=net';
 my $ldap_rootdn   = 'cn=Manager,dc=example,dc=net';
 my $ldap_rootpw   = 'secret';
-my $ldap_pwfile   = "${TestLib::tmp_check}/ldappassword";
+my $ldap_pwfile   = "${PostgreSQL::Test::Utils::tmp_check}/ldappassword";
 
 note "setting up slapd";
 
@@ -113,11 +158,17 @@ system_or_bail "openssl", "x509", "-req", "-in", "$slapd_certs/server.csr",
   "-CA", "$slapd_certs/ca.crt", "-CAkey", "$slapd_certs/ca.key",
   "-CAcreateserial", "-out", "$slapd_certs/server.crt";
 
-system_or_bail $slapd, '-f', $slapd_conf, '-h', "$ldap_url $ldaps_url";
+# -s0 prevents log messages ending up in syslog
+system_or_bail $slapd, '-f', $slapd_conf,'-s0', '-h', "$ldap_url $ldaps_url";
 
 END
 {
+	# take care not to change the script's exit value
+	my $exit_code = $?;
+
 	kill 'INT', `cat $slapd_pidfile` if -f $slapd_pidfile;
+
+	$? = $exit_code;
 }
 
 append_to_file($ldap_pwfile, $ldap_rootpw);
@@ -155,7 +206,7 @@ system_or_bail 'ldappasswd', '-x', '-y', $ldap_pwfile, '-s', 'secret2',
 
 note "setting up PostgreSQL instance";
 
-my $node = get_new_node('node');
+my $node = PostgreSQL::Test::Cluster->new('node');
 $node->init;
 $node->append_conf('postgresql.conf', "log_connections = on\n");
 $node->start;
@@ -367,3 +418,5 @@ $node->restart;
 
 $ENV{"PGPASSWORD"} = 'secret1';
 test_access($node, 'test1', 2, 'bad combination of LDAPS and StartTLS');
+
+done_testing();

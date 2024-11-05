@@ -23,7 +23,7 @@
  *	  POSTGRES relation descriptor (a/k/a relcache entry) definitions.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/rel.h
@@ -43,6 +43,7 @@
 #include "rewrite/prs2lock.h"
 #include "storage/block.h"
 #include "storage/relfilenode.h"
+#include "storage/smgr.h"
 #include "utils/relcache.h"
 #include "utils/reltrigger.h"
 
@@ -72,8 +73,7 @@ typedef LockInfoData *LockInfo;
 typedef struct RelationData
 {
 	RelFileNode rd_node;		/* relation physical identifier */
-	/* use "struct" here to avoid needing to include smgr.h: */
-	struct SMgrRelationData *rd_smgr;	/* cached file handle, or NULL */
+	SMgrRelation rd_smgr;		/* cached file handle, or NULL */
 	int			rd_refcnt;		/* reference count */
 	BackendId	rd_backend;		/* owning backend id, if temporary relation */
 	bool		rd_islocaltemp; /* rel is a temp rel of this session */
@@ -179,7 +179,7 @@ typedef struct RelationData
 	Bitmapset  *rd_pkattr;		/* cols included in primary key */
 	Bitmapset  *rd_idattr;		/* included in replica identity index */
 
-	PublicationActions *rd_pubactions;	/* publication actions */
+	PublicationDesc *rd_pubdesc;	/* publication descriptor, or NULL */
 
 	/*
 	 * rd_options is set whenever rd_rel is loaded into the relcache entry.
@@ -264,6 +264,7 @@ typedef struct RelationData
 	 */
 	Oid			rd_toastoid;	/* Real TOAST table's OID, or InvalidOid */
 
+	bool		pgstat_enabled; /* should relation stats be counted */
 	/* use "struct" here to avoid needing to include pgstat.h: */
 	struct PgStat_TableStatus *pgstat_info; /* statistics collection area */
 } RelationData;
@@ -415,6 +416,7 @@ typedef struct ViewOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	bool		security_barrier;
+	bool		security_invoker;
 	ViewOptCheckOption check_option;
 } ViewOptions;
 
@@ -427,6 +429,16 @@ typedef struct ViewOptions
 	(AssertMacro(relation->rd_rel->relkind == RELKIND_VIEW),				\
 	 (relation)->rd_options ?												\
 	  ((ViewOptions *) (relation)->rd_options)->security_barrier : false)
+
+/*
+ * RelationHasSecurityInvoker
+ *		Returns true if the relation has the security_invoker property set.
+ *		Note multiple eval of argument!
+ */
+#define RelationHasSecurityInvoker(relation)								\
+	(AssertMacro(relation->rd_rel->relkind == RELKIND_VIEW),				\
+	 (relation)->rd_options ?												\
+	  ((ViewOptions *) (relation)->rd_options)->security_invoker : false)
 
 /*
  * RelationHasCheckOption
@@ -545,15 +557,28 @@ typedef struct ViewOptions
 	(RELKIND_HAS_STORAGE((relation)->rd_rel->relkind) && \
 	 ((relation)->rd_rel->relfilenode == InvalidOid))
 
+#ifndef FRONTEND
 /*
- * RelationOpenSmgr
- *		Open the relation at the smgr level, if not already done.
+ * RelationGetSmgr
+ *		Returns smgr file handle for a relation, opening it if needed.
+ *
+ * Very little code is authorized to touch rel->rd_smgr directly.  Instead
+ * use this function to fetch its value.
+ *
+ * Note: since a relcache flush can cause the file handle to be closed again,
+ * it's unwise to hold onto the pointer returned by this function for any
+ * long period.  Recommended practice is to just re-execute RelationGetSmgr
+ * each time you need to access the SMgrRelation.  It's quite cheap in
+ * comparison to whatever an smgr function is going to do.
  */
-#define RelationOpenSmgr(relation) \
-	do { \
-		if ((relation)->rd_smgr == NULL) \
-			smgrsetowner(&((relation)->rd_smgr), smgropen((relation)->rd_node, (relation)->rd_backend)); \
-	} while (0)
+static inline SMgrRelation
+RelationGetSmgr(Relation rel)
+{
+	if (unlikely(rel->rd_smgr == NULL))
+		smgrsetowner(&(rel->rd_smgr), smgropen(rel->rd_node, rel->rd_backend));
+	return rel->rd_smgr;
+}
+#endif							/* !FRONTEND */
 
 /*
  * RelationCloseSmgr
@@ -575,7 +600,8 @@ typedef struct ViewOptions
  *		Fetch relation's current insertion target block.
  *
  * Returns InvalidBlockNumber if there is no current target block.  Note
- * that the target block status is discarded on any smgr-level invalidation.
+ * that the target block status is discarded on any smgr-level invalidation,
+ * so there's no need to re-open the smgr handle if it's not currently open.
  */
 #define RelationGetTargetBlock(relation) \
 	( (relation)->rd_smgr != NULL ? (relation)->rd_smgr->smgr_targblock : InvalidBlockNumber )
@@ -586,8 +612,7 @@ typedef struct ViewOptions
  */
 #define RelationSetTargetBlock(relation, targblock) \
 	do { \
-		RelationOpenSmgr(relation); \
-		(relation)->rd_smgr->smgr_targblock = (targblock); \
+		RelationGetSmgr(relation)->smgr_targblock = (targblock); \
 	} while (0)
 
 /*

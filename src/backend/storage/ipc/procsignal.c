@@ -23,7 +23,7 @@
  *	  Routines for interprocess signaling
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -47,6 +47,7 @@
 #include "storage/latch.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
+#include "storage/smgr.h"
 #include "storage/sinval.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
@@ -120,11 +121,10 @@ static ProcSignalSlot *MyProcSignalSlot = NULL;
 static bool CheckProcSignal(ProcSignalReason reason);
 static void CleanupProcSignalState(int status, Datum arg);
 static void ResetProcSignalBarrierBits(uint32 flags);
-static bool ProcessBarrierPlaceholder(void);
 
 /*
  * ProcSignalShmemSize
- *		Compute space needed for procsignal's shared memory
+ *		Compute space needed for ProcSignal's shared memory
  */
 Size
 ProcSignalShmemSize(void)
@@ -138,7 +138,7 @@ ProcSignalShmemSize(void)
 
 /*
  * ProcSignalShmemInit
- *		Allocate and initialize procsignal's shared memory
+ *		Allocate and initialize ProcSignal's shared memory
  */
 void
 ProcSignalShmemInit(void)
@@ -171,7 +171,7 @@ ProcSignalShmemInit(void)
 
 /*
  * ProcSignalInit
- *		Register the current process in the procsignal array
+ *		Register the current process in the ProcSignal array
  *
  * The passed index should be my BackendId if the process has one,
  * or MaxBackends + aux process type if not.
@@ -412,6 +412,11 @@ WaitForProcSignalBarrier(uint64 generation)
 {
 	Assert(generation <= pg_atomic_read_u64(&ProcSignal->psh_barrierGeneration));
 
+	elog(DEBUG1,
+		 "waiting for all backends to process ProcSignalBarrier generation "
+		 UINT64_FORMAT,
+		 generation);
+
 	for (int i = NumProcSignalSlots - 1; i >= 0; i--)
 	{
 		ProcSignalSlot *slot = &ProcSignal->psh_slot[i];
@@ -426,12 +431,21 @@ WaitForProcSignalBarrier(uint64 generation)
 		oldval = pg_atomic_read_u64(&slot->pss_barrierGeneration);
 		while (oldval < generation)
 		{
-			ConditionVariableSleep(&slot->pss_barrierCV,
-								   WAIT_EVENT_PROC_SIGNAL_BARRIER);
+			if (ConditionVariableTimedSleep(&slot->pss_barrierCV,
+											5000,
+											WAIT_EVENT_PROC_SIGNAL_BARRIER))
+				ereport(LOG,
+						(errmsg("still waiting for backend with PID %lu to accept ProcSignalBarrier",
+								(unsigned long) slot->pss_pid)));
 			oldval = pg_atomic_read_u64(&slot->pss_barrierGeneration);
 		}
 		ConditionVariableCancelSleep();
 	}
+
+	elog(DEBUG1,
+		 "finished waiting for all backends to process ProcSignalBarrier generation "
+		 UINT64_FORMAT,
+		 generation);
 
 	/*
 	 * The caller is probably calling this function because it wants to read
@@ -546,8 +560,8 @@ ProcessProcSignalBarrier(void)
 				type = (ProcSignalBarrierType) pg_rightmost_one_pos32(flags);
 				switch (type)
 				{
-					case PROCSIGNAL_BARRIER_PLACEHOLDER:
-						processed = ProcessBarrierPlaceholder();
+					case PROCSIGNAL_BARRIER_SMGRRELEASE:
+						processed = ProcessBarrierSmgrRelease();
 						break;
 				}
 
@@ -611,24 +625,6 @@ ResetProcSignalBarrierBits(uint32 flags)
 	pg_atomic_fetch_or_u32(&MyProcSignalSlot->pss_barrierCheckMask, flags);
 	ProcSignalBarrierPending = true;
 	InterruptPending = true;
-}
-
-static bool
-ProcessBarrierPlaceholder(void)
-{
-	/*
-	 * XXX. This is just a placeholder until the first real user of this
-	 * machinery gets committed. Rename PROCSIGNAL_BARRIER_PLACEHOLDER to
-	 * PROCSIGNAL_BARRIER_SOMETHING_ELSE where SOMETHING_ELSE is something
-	 * appropriately descriptive. Get rid of this function and instead have
-	 * ProcessBarrierSomethingElse. Most likely, that function should live in
-	 * the file pertaining to that subsystem, rather than here.
-	 *
-	 * The return value should be 'true' if the barrier was successfully
-	 * absorbed and 'false' if not. Note that returning 'false' can lead to
-	 * very frequent retries, so try hard to make that an uncommon case.
-	 */
-	return true;
 }
 
 /*

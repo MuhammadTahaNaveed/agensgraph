@@ -24,7 +24,7 @@
  *	to control oid and relfilenode assignment, and do other special
  *	hacks needed for pg_upgrade.
  *
- *	Copyright (c) 2010-2021, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2022, PostgreSQL Global Development Group
  *	src/backend/utils/adt/pg_upgrade_support.c
  */
 
@@ -47,6 +47,17 @@ do {															\
 				(errcode(ERRCODE_CANT_CHANGE_RUNTIME_PARAM),	\
 				 errmsg("function can only be called when server is in binary upgrade mode"))); \
 } while (0)
+
+Datum
+binary_upgrade_set_next_pg_tablespace_oid(PG_FUNCTION_ARGS)
+{
+	Oid			tbspoid = PG_GETARG_OID(0);
+
+	CHECK_IS_BINARY_UPGRADE;
+	binary_upgrade_next_pg_tablespace_oid = tbspoid;
+
+	PG_RETURN_VOID();
+}
 
 Datum
 binary_upgrade_set_next_pg_type_oid(PG_FUNCTION_ARGS)
@@ -104,6 +115,17 @@ binary_upgrade_set_next_heap_pg_class_oid(PG_FUNCTION_ARGS)
 }
 
 Datum
+binary_upgrade_set_next_heap_relfilenode(PG_FUNCTION_ARGS)
+{
+	Oid			nodeoid = PG_GETARG_OID(0);
+
+	CHECK_IS_BINARY_UPGRADE;
+	binary_upgrade_next_heap_pg_class_relfilenode = nodeoid;
+
+	PG_RETURN_VOID();
+}
+
+Datum
 binary_upgrade_set_next_index_pg_class_oid(PG_FUNCTION_ARGS)
 {
 	Oid			reloid = PG_GETARG_OID(0);
@@ -115,12 +137,34 @@ binary_upgrade_set_next_index_pg_class_oid(PG_FUNCTION_ARGS)
 }
 
 Datum
+binary_upgrade_set_next_index_relfilenode(PG_FUNCTION_ARGS)
+{
+	Oid			nodeoid = PG_GETARG_OID(0);
+
+	CHECK_IS_BINARY_UPGRADE;
+	binary_upgrade_next_index_pg_class_relfilenode = nodeoid;
+
+	PG_RETURN_VOID();
+}
+
+Datum
 binary_upgrade_set_next_toast_pg_class_oid(PG_FUNCTION_ARGS)
 {
 	Oid			reloid = PG_GETARG_OID(0);
 
 	CHECK_IS_BINARY_UPGRADE;
 	binary_upgrade_next_toast_pg_class_oid = reloid;
+
+	PG_RETURN_VOID();
+}
+
+Datum
+binary_upgrade_set_next_toast_relfilenode(PG_FUNCTION_ARGS)
+{
+	Oid			nodeoid = PG_GETARG_OID(0);
+
+	CHECK_IS_BINARY_UPGRADE;
+	binary_upgrade_next_toast_pg_class_relfilenode = nodeoid;
 
 	PG_RETURN_VOID();
 }

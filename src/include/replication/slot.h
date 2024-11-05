@@ -21,7 +21,7 @@
  * slot.h
  *	   Replication slot management.
  *
- * Copyright (c) 2012-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2022, PostgreSQL Global Development Group
  *
  *-------------------------------------------------------------------------
  */
@@ -103,11 +103,10 @@ typedef struct ReplicationSlotPersistentData
 	XLogRecPtr	confirmed_flush;
 
 	/*
-	 * LSN at which we found a consistent point at the time of slot creation.
-	 * This is also the point where we have exported a snapshot for the
-	 * initial copy.
+	 * LSN at which we enabled two_phase commit for this slot or LSN at which
+	 * we found a consistent point at the time of slot creation.
 	 */
-	XLogRecPtr	initial_consistent_point;
+	XLogRecPtr	two_phase_at;
 
 	/*
 	 * Allow decoding of prepared transactions?
@@ -226,6 +225,7 @@ extern void ReplicationSlotSave(void);
 extern void ReplicationSlotMarkDirty(void);
 
 /* misc stuff */
+extern void ReplicationSlotInitialize(void);
 extern bool ReplicationSlotValidateName(const char *name, int elevel);
 extern void ReplicationSlotReserveWal(void);
 extern void ReplicationSlotsComputeRequiredXmin(bool already_locked);
@@ -235,6 +235,8 @@ extern bool ReplicationSlotsCountDBSlots(Oid dboid, int *nslots, int *nactive);
 extern void ReplicationSlotsDropDBSlots(Oid dboid);
 extern bool InvalidateObsoleteReplicationSlots(XLogSegNo oldestSegno);
 extern ReplicationSlot *SearchNamedReplicationSlot(const char *name, bool need_lock);
+extern int	ReplicationSlotIndex(ReplicationSlot *slot);
+extern bool ReplicationSlotName(int index, Name name);
 extern void ReplicationSlotNameForTablesync(Oid suboid, Oid relid, char *syncslotname, int szslot);
 extern void ReplicationSlotDropAtPubNode(WalReceiverConn *wrconn, char *slotname, bool missing_ok);
 
@@ -242,5 +244,6 @@ extern void StartupReplicationSlots(void);
 extern void CheckPointReplicationSlots(void);
 
 extern void CheckSlotRequirements(void);
+extern void CheckSlotPermissions(void);
 
 #endif							/* SLOT_H */

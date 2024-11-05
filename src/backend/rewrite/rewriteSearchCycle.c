@@ -22,7 +22,7 @@
  * rewriteSearchCycle.c
  *		Support for rewriting SEARCH and CYCLE clauses.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -326,8 +326,8 @@ rewriteSearchAndCycle(CommonTableExpr *cte)
 					  list_nth_oid(cte->ctecolcollations, i),
 					  0);
 		tle = makeTargetEntry((Expr *) var, i + 1, strVal(list_nth(cte->ctecolnames, i)), false);
-		tle->resorigtbl = castNode(TargetEntry, list_nth(rte1->subquery->targetList, i))->resorigtbl;
-		tle->resorigcol = castNode(TargetEntry, list_nth(rte1->subquery->targetList, i))->resorigcol;
+		tle->resorigtbl = list_nth_node(TargetEntry, rte1->subquery->targetList, i)->resorigtbl;
+		tle->resorigcol = list_nth_node(TargetEntry, rte1->subquery->targetList, i)->resorigcol;
 		newq1->targetList = lappend(newq1->targetList, tle);
 	}
 
@@ -514,8 +514,8 @@ rewriteSearchAndCycle(CommonTableExpr *cte)
 					  list_nth_oid(cte->ctecolcollations, i),
 					  0);
 		tle = makeTargetEntry((Expr *) var, i + 1, strVal(list_nth(cte->ctecolnames, i)), false);
-		tle->resorigtbl = castNode(TargetEntry, list_nth(rte2->subquery->targetList, i))->resorigtbl;
-		tle->resorigcol = castNode(TargetEntry, list_nth(rte2->subquery->targetList, i))->resorigcol;
+		tle->resorigtbl = list_nth_node(TargetEntry, rte2->subquery->targetList, i)->resorigtbl;
+		tle->resorigcol = list_nth_node(TargetEntry, rte2->subquery->targetList, i)->resorigcol;
 		newq2->targetList = lappend(newq2->targetList, tle);
 	}
 

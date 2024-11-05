@@ -23,7 +23,7 @@
  *	  POSTGRES lock manager definitions.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/lmgr.h
@@ -57,6 +57,7 @@ extern void RelationInitLockInfo(Relation relation);
 
 /* Lock a relation */
 extern void LockRelationOid(Oid relid, LOCKMODE lockmode);
+extern void LockRelationId(LockRelId *relid, LOCKMODE lockmode);
 extern bool ConditionalLockRelationOid(Oid relid, LOCKMODE lockmode);
 extern void UnlockRelationId(LockRelId *relid, LOCKMODE lockmode);
 extern void UnlockRelationOid(Oid relid, LOCKMODE lockmode);
@@ -66,6 +67,8 @@ extern bool ConditionalLockRelation(Relation relation, LOCKMODE lockmode);
 extern void UnlockRelation(Relation relation, LOCKMODE lockmode);
 extern bool CheckRelationLockedByMe(Relation relation, LOCKMODE lockmode,
 									bool orstronger);
+extern bool CheckRelationOidLockedByMe(Oid relid, LOCKMODE lockmode,
+									   bool orstronger);
 extern bool LockHasWaitersRelation(Relation relation, LOCKMODE lockmode);
 
 extern void LockRelationIdForSession(LockRelId *relid, LOCKMODE lockmode);
@@ -111,6 +114,8 @@ extern void SpeculativeInsertionWait(TransactionId xid, uint32 token);
 /* Lock a general object (other than a relation) of the current database */
 extern void LockDatabaseObject(Oid classid, Oid objid, uint16 objsubid,
 							   LOCKMODE lockmode);
+extern bool ConditionalLockDatabaseObject(Oid classid, Oid objid,
+										  uint16 objsubid, LOCKMODE lockmode);
 extern void UnlockDatabaseObject(Oid classid, Oid objid, uint16 objsubid,
 								 LOCKMODE lockmode);
 

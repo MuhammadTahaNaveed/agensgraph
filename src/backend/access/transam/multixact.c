@@ -78,7 +78,7 @@
  * counter does not fall within the wraparound horizon considering the global
  * minimum value.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/multixact.c
@@ -93,8 +93,8 @@
 #include "access/twophase.h"
 #include "access/twophase_rmgr.h"
 #include "access/xact.h"
-#include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "access/xlogutils.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "funcapi.h"
@@ -819,7 +819,8 @@ MultiXactIdCreateFromMembers(int nmembers, MultiXactMember *members)
 			if (ISUPDATE_from_mxstatus(members[i].status))
 			{
 				if (has_update)
-					elog(ERROR, "new multixact has more than one updating member");
+					elog(ERROR, "new multixact has more than one updating member: %s",
+						 mxid_to_string(InvalidMultiXactId, nmembers, members));
 				has_update = true;
 			}
 		}
@@ -2850,6 +2851,7 @@ MultiXactMemberFreezeThreshold(void)
 	uint32		multixacts;
 	uint32		victim_multixacts;
 	double		fraction;
+	int			result;
 
 	/* If we can't determine member space utilization, assume the worst. */
 	if (!ReadMultiXactCounts(&multixacts, &members))
@@ -2871,7 +2873,13 @@ MultiXactMemberFreezeThreshold(void)
 	/* fraction could be > 1.0, but lowest possible freeze age is zero */
 	if (victim_multixacts > multixacts)
 		return 0;
-	return multixacts - victim_multixacts;
+	result = multixacts - victim_multixacts;
+
+	/*
+	 * Clamp to autovacuum_multixact_freeze_max_age, so that we never make
+	 * autovacuum less aggressive than it would otherwise be.
+	 */
+	return Min(result, autovacuum_multixact_freeze_max_age);
 }
 
 typedef struct mxtruncinfo
@@ -3094,8 +3102,8 @@ TruncateMultiXact(MultiXactId newOldestMulti, Oid newOldestMultiDB)
 	 * crash/basebackup, even though the state of the data directory would
 	 * require it.
 	 */
-	Assert(!MyProc->delayChkpt);
-	MyProc->delayChkpt = true;
+	Assert((MyProc->delayChkptFlags & DELAY_CHKPT_START) == 0);
+	MyProc->delayChkptFlags |= DELAY_CHKPT_START;
 
 	/* WAL log truncation */
 	WriteMTruncateXlogRec(newOldestMultiDB,
@@ -3121,7 +3129,7 @@ TruncateMultiXact(MultiXactId newOldestMulti, Oid newOldestMultiDB)
 	/* Then offsets */
 	PerformOffsetsTruncation(oldestMulti, newOldestMulti);
 
-	MyProc->delayChkpt = false;
+	MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 
 	END_CRIT_SECTION();
 	LWLockRelease(MultiXactTruncationLock);

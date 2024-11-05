@@ -38,7 +38,8 @@ PostgreSQL documentation
    linkend="app-psql"/> to restore the databases.  It does this by
    calling <xref linkend="app-pgdump"/> for each database in the cluster.
    <application>pg_dumpall</application> also dumps global objects
-   that are common to all databases, that is, database roles and tablespaces.
+   that are common to all databases, namely database roles, tablespaces,
+   and privilege grants for configuration parameters.
    (<application>pg_dump</application> does not save these objects.)
   </para>
 
@@ -90,9 +91,12 @@ PostgreSQL documentation
       <term><option>--clean</option></term>
       <listitem>
        <para>
-        Include SQL commands to clean (drop) databases before
-        recreating them.  <command>DROP</command> commands for roles and
-        tablespaces are added as well.
+        Emit SQL commands to <command>DROP</command> all the dumped
+        databases, roles, and tablespaces before recreating them.
+        This option is useful when the restore is to overwrite an existing
+        cluster.  If any of the objects do not exist in the destination
+        cluster, ignorable error messages will be reported during
+        restore, unless <option>--if-exists</option> is also specified.
        </para>
       </listitem>
      </varlistentry>
@@ -323,9 +327,11 @@ PostgreSQL documentation
       <term><option>--if-exists</option></term>
       <listitem>
        <para>
-        Use conditional commands (i.e., add an <literal>IF EXISTS</literal>
-        clause) to drop databases and other objects.  This option is not valid
-        unless <option>--clean</option> is also specified.
+        Use <literal>DROP ... IF EXISTS</literal> commands to drop objects
+        in <option>--clean</option> mode.  This suppresses <quote>does not
+        exist</quote> errors that might otherwise be reported.  This
+        option is not valid unless <option>--clean</option> is also
+        specified.
        </para>
       </listitem>
      </varlistentry>
@@ -360,10 +366,6 @@ PostgreSQL documentation
         and the two systems have different definitions of the collation used
         to sort the partitioning column.
        </para>
-
-       <!-- Currently, we don't need pg_dump's warning about parallelism here,
-        since parallel restore from a pg_dumpall script is impossible.
-       -->
       </listitem>
      </varlistentry>
 
@@ -442,6 +444,17 @@ PostgreSQL documentation
         faster, but means that a subsequent operating system crash can leave
         the dump corrupt.  Generally, this option is useful for testing
         but should not be used when dumping data from production installation.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--no-table-access-method</option></term>
+      <listitem>
+       <para>
+        Do not output commands to select table access methods.
+        With this option, all objects will be created with whichever
+        table access method is the default during restore.
        </para>
       </listitem>
      </varlistentry>

@@ -18,13 +18,13 @@
  */
 
 /* ----------
- * progress.c
+ * backend_progress.c
  *
  *	Command progress reporting infrastructure.
  *
- *	Copyright (c) 2001-2021, PostgreSQL Global Development Group
+ *	Copyright (c) 2001-2022, PostgreSQL Global Development Group
  *
- *	src/backend/postmaster/progress.c
+ *	src/backend/utils/activity/backend_progress.c
  * ----------
  */
 #include "postgres.h"

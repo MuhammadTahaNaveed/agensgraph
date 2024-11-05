@@ -22,7 +22,7 @@
  * pg_verifybackup.c
  *	  Verify a backup against a backup manifest.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/pg_verifybackup/pg_verifybackup.c
@@ -271,8 +271,8 @@ main(int argc, char **argv)
 				canonicalize_path(wal_directory);
 				break;
 			default:
-				fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
-						progname);
+				/* getopt_long already emitted a complaint */
+				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 				exit(1);
 		}
 	}
@@ -280,9 +280,8 @@ main(int argc, char **argv)
 	/* Get backup directory name */
 	if (optind >= argc)
 	{
-		pg_log_fatal("no backup directory specified");
-		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
-				progname);
+		pg_log_error("no backup directory specified");
+		pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 		exit(1);
 	}
 	context.backup_directory = pstrdup(argv[optind++]);
@@ -291,10 +290,9 @@ main(int argc, char **argv)
 	/* Complain if any arguments remain */
 	if (optind < argc)
 	{
-		pg_log_fatal("too many command-line arguments (first is \"%s\")",
+		pg_log_error("too many command-line arguments (first is \"%s\")",
 					 argv[optind]);
-		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
-				progname);
+		pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 		exit(1);
 	}
 
@@ -313,17 +311,13 @@ main(int argc, char **argv)
 
 			if (find_my_exec(argv[0], full_path) < 0)
 				strlcpy(full_path, progname, sizeof(full_path));
+
 			if (ret == -1)
-				pg_log_fatal("The program \"%s\" is needed by %s but was not found in the\n"
-							 "same directory as \"%s\".\n"
-							 "Check your installation.",
-							 "pg_waldump", "pg_verifybackup", full_path);
+				pg_fatal("program \"%s\" is needed by %s but was not found in the same directory as \"%s\"",
+						 "pg_waldump", "pg_verifybackup", full_path);
 			else
-				pg_log_fatal("The program \"%s\" was found by \"%s\"\n"
-							 "but was not the same version as %s.\n"
-							 "Check your installation.",
-							 "pg_waldump", full_path, "pg_verifybackup");
-			exit(1);
+				pg_fatal("program \"%s\" was found by \"%s\" but was not the same version as %s",
+						 "pg_waldump", full_path, "pg_verifybackup");
 		}
 	}
 
@@ -468,7 +462,7 @@ report_manifest_error(JsonManifestParseContext *context, const char *fmt,...)
 	va_list		ap;
 
 	va_start(ap, fmt);
-	pg_log_generic_v(PG_LOG_FATAL, gettext(fmt), ap);
+	pg_log_generic_v(PG_LOG_ERROR, PG_LOG_PRIMARY, gettext(fmt), ap);
 	va_end(ap);
 
 	exit(1);
@@ -765,8 +759,6 @@ verify_file_checksum(verifier_context *context, manifest_file *m,
 			close(fd);
 			return;
 		}
-
-
 	}
 	if (rc < 0)
 		report_backup_error(context, "could not read file \"%s\": %m",
@@ -859,7 +851,7 @@ report_backup_error(verifier_context *context, const char *pg_restrict fmt,...)
 	va_list		ap;
 
 	va_start(ap, fmt);
-	pg_log_generic_v(PG_LOG_ERROR, gettext(fmt), ap);
+	pg_log_generic_v(PG_LOG_ERROR, PG_LOG_PRIMARY, gettext(fmt), ap);
 	va_end(ap);
 
 	context->saw_any_error = true;
@@ -876,7 +868,7 @@ report_fatal_error(const char *pg_restrict fmt,...)
 	va_list		ap;
 
 	va_start(ap, fmt);
-	pg_log_generic_v(PG_LOG_FATAL, gettext(fmt), ap);
+	pg_log_generic_v(PG_LOG_ERROR, PG_LOG_PRIMARY, gettext(fmt), ap);
 	va_end(ap);
 
 	exit(1);

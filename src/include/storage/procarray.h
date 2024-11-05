@@ -23,7 +23,7 @@
  *	  POSTGRES process array definitions.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/procarray.h
@@ -58,6 +58,7 @@ extern void ExpireTreeKnownAssignedTransactionIds(TransactionId xid,
 												  TransactionId max_xid);
 extern void ExpireAllKnownAssignedTransactionIds(void);
 extern void ExpireOldKnownAssignedTransactionIds(TransactionId xid);
+extern void KnownAssignedTransactionIdsIdleMaintenance(void);
 
 extern int	GetMaxSnapshotXidCount(void);
 extern int	GetMaxSnapshotSubxidCount(void);
@@ -78,12 +79,9 @@ extern TransactionId GetOldestActiveTransactionId(void);
 extern TransactionId GetOldestSafeDecodingTransactionId(bool catalogOnly);
 extern void GetReplicationHorizons(TransactionId *slot_xmin, TransactionId *catalog_xmin);
 
-extern VirtualTransactionId *GetVirtualXIDsDelayingChkpt(int *nvxids);
-extern VirtualTransactionId *GetVirtualXIDsDelayingChkptEnd(int *nvxids);
+extern VirtualTransactionId *GetVirtualXIDsDelayingChkpt(int *nvxids, int type);
 extern bool HaveVirtualXIDsDelayingChkpt(VirtualTransactionId *vxids,
-										 int nvxids);
-extern bool HaveVirtualXIDsDelayingChkptEnd(VirtualTransactionId *vxids,
-											int nvxids);
+										 int nvxids, int type);
 
 extern PGPROC *BackendPidGetProc(int pid);
 extern PGPROC *BackendPidGetProcWithLock(int pid);

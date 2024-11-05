@@ -1,3 +1,6 @@
+-- directory paths are passed to us in environment variables
+\getenv abs_srcdir PG_ABS_SRCDIR
+
 --
 -- Sanity checks for text search catalogs
 --
@@ -38,6 +41,17 @@ RIGHT JOIN pg_ts_config_map AS m
     ON (tt.cfgid=m.mapcfg AND tt.tokid=m.maptokentype)
 WHERE
     tt.cfgid IS NULL OR tt.tokid IS NULL;
+
+-- Load some test data
+CREATE TABLE test_tsvector(
+	t text,
+	a tsvector
+);
+
+\set filename :abs_srcdir '/data/tsearch.data'
+COPY test_tsvector FROM :'filename';
+
+ANALYZE test_tsvector;
 
 -- test basic text search behavior without indexes, then with
 
@@ -549,6 +563,12 @@ SELECT ts_headline('english',
 to_tsquery('english','Lorem') && phraseto_tsquery('english','ullamcorper urna'),
 'MaxFragments=100, MaxWords=100, MinWords=1');
 
+-- Edge cases with empty query
+SELECT ts_headline('english',
+'', to_tsquery('english', ''));
+SELECT ts_headline('english',
+'foo bar', to_tsquery('english', ''));
+
 --Rewrite sub system
 
 CREATE TABLE test_tsquery (txtkeyword TEXT, txtsample TEXT);
@@ -721,7 +741,10 @@ select websearch_to_tsquery('simple', ':');
 select websearch_to_tsquery('simple', 'abc & def');
 select websearch_to_tsquery('simple', 'abc | def');
 select websearch_to_tsquery('simple', 'abc <-> def');
+
+-- parens are ignored, too
 select websearch_to_tsquery('simple', 'abc (pg or class)');
+select websearch_to_tsquery('simple', '(foo bar) or (ding dong)');
 
 -- NOT is ignored in quotes
 select websearch_to_tsquery('english', 'My brand new smartphone');

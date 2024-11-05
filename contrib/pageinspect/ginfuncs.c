@@ -2,7 +2,7 @@
  * ginfuncs.c
  *		Functions to investigate the content of GIN indexes
  *
- * Copyright (c) 2014-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2014-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		contrib/pageinspect/ginfuncs.c
@@ -60,7 +60,8 @@ gin_metapage_info(PG_FUNCTION_ARGS)
 						   (int) MAXALIGN(sizeof(GinPageOpaqueData)),
 						   (int) PageGetSpecialSize(page))));
 
-	opaq = (GinPageOpaque) PageGetSpecialPointer(page);
+	opaq = GinPageGetOpaque(page);
+
 	if (opaq->flags != GIN_META)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -129,7 +130,7 @@ gin_page_opaque_info(PG_FUNCTION_ARGS)
 						   (int) MAXALIGN(sizeof(GinPageOpaqueData)),
 						   (int) PageGetSpecialSize(page))));
 
-	opaq = (GinPageOpaque) PageGetSpecialPointer(page);
+	opaq = GinPageGetOpaque(page);
 
 	/* Build a tuple descriptor for our result type */
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
@@ -220,7 +221,7 @@ gin_leafpage_items(PG_FUNCTION_ARGS)
 							   (int) MAXALIGN(sizeof(GinPageOpaqueData)),
 							   (int) PageGetSpecialSize(page))));
 
-		opaq = (GinPageOpaque) PageGetSpecialPointer(page);
+		opaq = GinPageGetOpaque(page);
 		if (opaq->flags != (GIN_DATA | GIN_LEAF | GIN_COMPRESSED))
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),

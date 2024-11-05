@@ -33,7 +33,7 @@
  * plenty of locality of access.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -105,7 +105,7 @@ _h_spoolinit(Relation heap, Relation index, uint32 num_buckets)
 												   hspool->max_buckets,
 												   maintenance_work_mem,
 												   NULL,
-												   false);
+												   TUPLESORT_NONE);
 
 	return hspool;
 }
@@ -164,6 +164,9 @@ _h_indexbuild(HSpool *hspool, Relation heapRel)
 #endif
 
 		_hash_doinsert(hspool->index, itup, heapRel);
+
+		/* allow insertion phase to be interrupted, and track progress */
+		CHECK_FOR_INTERRUPTS();
 
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_DONE,
 									 ++tups_done);

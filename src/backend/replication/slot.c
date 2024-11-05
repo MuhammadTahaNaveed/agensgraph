@@ -23,7 +23,7 @@
  *	   Replication slot management.
  *
  *
- * Copyright (c) 2012-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2022, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -65,6 +65,7 @@
 #include "pgstat.h"
 #include "replication/slot.h"
 #include "storage/fd.h"
+#include "storage/ipc.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
@@ -96,11 +97,11 @@ typedef struct ReplicationSlotOnDisk
 #define ReplicationSlotOnDiskConstantSize \
 	offsetof(ReplicationSlotOnDisk, slotdata)
 /* size of the part of the slot not covered by the checksum */
-#define SnapBuildOnDiskNotChecksummedSize \
+#define ReplicationSlotOnDiskNotChecksummedSize  \
 	offsetof(ReplicationSlotOnDisk, version)
 /* size of the part covered by the checksum */
-#define SnapBuildOnDiskChecksummedSize \
-	sizeof(ReplicationSlotOnDisk) - SnapBuildOnDiskNotChecksummedSize
+#define ReplicationSlotOnDiskChecksummedSize \
+	sizeof(ReplicationSlotOnDisk) - ReplicationSlotOnDiskNotChecksummedSize
 /* size of the slot data that is version dependent */
 #define ReplicationSlotOnDiskV2Size \
 	sizeof(ReplicationSlotOnDisk) - ReplicationSlotOnDiskConstantSize
@@ -118,6 +119,7 @@ ReplicationSlot *MyReplicationSlot = NULL;
 int			max_replication_slots = 0;	/* the maximum number of replication
 										 * slots */
 
+static void ReplicationSlotShmemExit(int code, Datum arg);
 static void ReplicationSlotDropAcquired(void);
 static void ReplicationSlotDropPtr(ReplicationSlot *slot);
 
@@ -180,6 +182,29 @@ ReplicationSlotsShmemInit(void)
 }
 
 /*
+ * Register the callback for replication slot cleanup and releasing.
+ */
+void
+ReplicationSlotInitialize(void)
+{
+	before_shmem_exit(ReplicationSlotShmemExit, 0);
+}
+
+/*
+ * Release and cleanup replication slots.
+ */
+static void
+ReplicationSlotShmemExit(int code, Datum arg)
+{
+	/* Make sure active replication slots are released */
+	if (MyReplicationSlot != NULL)
+		ReplicationSlotRelease();
+
+	/* Also cleanup all the temporary slots. */
+	ReplicationSlotCleanup();
+}
+
+/*
  * Check whether the passed slot name is valid and report errors at elevel.
  *
  * Slot names may consist out of [a-z0-9_]{1,NAMEDATALEN-1} which should allow
@@ -237,7 +262,7 @@ ReplicationSlotValidateName(const char *name, int elevel)
  *     to be enabled only at the slot creation time. If we allow this option
  *     to be changed during decoding then it is quite possible that we skip
  *     prepare first time because this option was not enabled. Now next time
- *     during getting changes, if the two_phase  option is enabled it can skip
+ *     during getting changes, if the two_phase option is enabled it can skip
  *     prepare because by that time start decoding point has been moved. So the
  *     user will only get commit prepared.
  */
@@ -302,6 +327,7 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	slot->data.database = db_specific ? MyDatabaseId : InvalidOid;
 	slot->data.persistency = persistency;
 	slot->data.two_phase = two_phase;
+	slot->data.two_phase_at = InvalidXLogRecPtr;
 
 	/* and then data only present in shared memory */
 	slot->just_dirtied = false;
@@ -345,7 +371,7 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	 * ReplicationSlotAllocationLock.
 	 */
 	if (SlotIsLogical(slot))
-		pgstat_report_replslot_create(NameStr(slot->data.name));
+		pgstat_create_replslot(slot);
 
 	/*
 	 * Now that the slot has been marked as in_use and active, it's safe to
@@ -386,6 +412,50 @@ SearchNamedReplicationSlot(const char *name, bool need_lock)
 		LWLockRelease(ReplicationSlotControlLock);
 
 	return slot;
+}
+
+/*
+ * Return the index of the replication slot in
+ * ReplicationSlotCtl->replication_slots.
+ *
+ * This is mainly useful to have an efficient key for storing replication slot
+ * stats.
+ */
+int
+ReplicationSlotIndex(ReplicationSlot *slot)
+{
+	Assert(slot >= ReplicationSlotCtl->replication_slots &&
+		   slot < ReplicationSlotCtl->replication_slots + max_replication_slots);
+
+	return slot - ReplicationSlotCtl->replication_slots;
+}
+
+/*
+ * If the slot at 'index' is unused, return false. Otherwise 'name' is set to
+ * the slot's name and true is returned.
+ *
+ * This likely is only useful for pgstat_replslot.c during shutdown, in other
+ * cases there are obvious TOCTOU issues.
+ */
+bool
+ReplicationSlotName(int index, Name name)
+{
+	ReplicationSlot *slot;
+	bool		found;
+
+	slot = &ReplicationSlotCtl->replication_slots[index];
+
+	/*
+	 * Ensure that the slot cannot be dropped while we copy the name. Don't
+	 * need the spinlock as the name of an existing slot cannot change.
+	 */
+	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
+	found = slot->in_use;
+	if (slot->in_use)
+		namestrcpy(name, NameStr(slot->data.name));
+	LWLockRelease(ReplicationSlotControlLock);
+
+	return found;
 }
 
 /*
@@ -475,6 +545,14 @@ retry:
 
 	/* We made this slot active, so it's ours now. */
 	MyReplicationSlot = s;
+
+	/*
+	 * The call to pgstat_acquire_replslot() protects against stats for a
+	 * different slot, from before a restart or such, being present during
+	 * pgstat_report_replslot().
+	 */
+	if (SlotIsLogical(s))
+		pgstat_acquire_replslot(s);
 }
 
 /*
@@ -695,23 +773,13 @@ ReplicationSlotDropPtr(ReplicationSlot *slot)
 				(errmsg("could not remove directory \"%s\"", tmppath)));
 
 	/*
-	 * Send a message to drop the replication slot to the stats collector.
-	 * Since there is no guarantee of the order of message transfer on a UDP
-	 * connection, it's possible that a message for creating a new slot
-	 * reaches before a message for removing the old slot. We send the drop
-	 * and create messages while holding ReplicationSlotAllocationLock to
-	 * reduce that possibility. If the messages reached in reverse, we would
-	 * lose one statistics update message. But the next update message will
-	 * create the statistics for the replication slot.
-	 *
-	 * XXX In case, the messages for creation and drop slot of the same name
-	 * get lost and create happens before (auto)vacuum cleans up the dead
-	 * slot, the stats will be accumulated into the old slot. One can imagine
-	 * having OIDs for each slot to avoid the accumulation of stats but that
-	 * doesn't seem worth doing as in practice this won't happen frequently.
+	 * Drop the statistics entry for the replication slot.  Do this while
+	 * holding ReplicationSlotAllocationLock so that we don't drop a
+	 * statistics entry for another slot with the same name just created in
+	 * another session.
 	 */
 	if (SlotIsLogical(slot))
-		pgstat_report_replslot_drop(NameStr(slot->data.name));
+		pgstat_drop_replslot(slot);
 
 	/*
 	 * We release this at the very end, so that nobody starts trying to create
@@ -797,6 +865,7 @@ ReplicationSlotsComputeRequiredXmin(bool already_locked)
 		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
 		TransactionId effective_xmin;
 		TransactionId effective_catalog_xmin;
+		bool		invalidated;
 
 		if (!s->in_use)
 			continue;
@@ -804,7 +873,13 @@ ReplicationSlotsComputeRequiredXmin(bool already_locked)
 		SpinLockAcquire(&s->mutex);
 		effective_xmin = s->effective_xmin;
 		effective_catalog_xmin = s->effective_catalog_xmin;
+		invalidated = (!XLogRecPtrIsInvalid(s->data.invalidated_at) &&
+					   XLogRecPtrIsInvalid(s->data.restart_lsn));
 		SpinLockRelease(&s->mutex);
+
+		/* invalidated slots need not apply */
+		if (invalidated)
+			continue;
 
 		/* check the data xmin */
 		if (TransactionIdIsValid(effective_xmin) &&
@@ -1075,6 +1150,18 @@ CheckSlotRequirements(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("replication slots can only be used if wal_level >= replica")));
+}
+
+/*
+ * Check whether the user has privilege to use replication slots.
+ */
+void
+CheckSlotPermissions(void)
+{
+	if (!superuser() && !has_rolreplication(GetUserId()))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser or replication role to use replication slots")));
 }
 
 /*
@@ -1577,8 +1664,8 @@ SaveSlotToPath(ReplicationSlot *slot, const char *dir, int elevel)
 	SpinLockRelease(&slot->mutex);
 
 	COMP_CRC32C(cp.checksum,
-				(char *) (&cp) + SnapBuildOnDiskNotChecksummedSize,
-				SnapBuildOnDiskChecksummedSize);
+				(char *) (&cp) + ReplicationSlotOnDiskNotChecksummedSize,
+				ReplicationSlotOnDiskChecksummedSize);
 	FIN_CRC32C(cp.checksum);
 
 	errno = 0;
@@ -1793,8 +1880,8 @@ RestoreSlotFromDisk(const char *name)
 	/* now verify the CRC */
 	INIT_CRC32C(checksum);
 	COMP_CRC32C(checksum,
-				(char *) &cp + SnapBuildOnDiskNotChecksummedSize,
-				SnapBuildOnDiskChecksummedSize);
+				(char *) &cp + ReplicationSlotOnDiskNotChecksummedSize,
+				ReplicationSlotOnDiskChecksummedSize);
 	FIN_CRC32C(checksum);
 
 	if (!EQ_CRC32C(checksum, cp.checksum))

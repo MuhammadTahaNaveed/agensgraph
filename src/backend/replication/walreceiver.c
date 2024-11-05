@@ -58,7 +58,7 @@
  * specific parts are in the libpqwalreceiver module. It's loaded
  * dynamically to avoid linking the server with libpq.
  *
- * Portions Copyright (c) 2010-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2022, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -75,6 +75,7 @@
 #include "access/transam.h"
 #include "access/xlog_internal.h"
 #include "access/xlogarchive.h"
+#include "access/xlogrecovery.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_type.h"
 #include "common/ip.h"
@@ -141,10 +142,12 @@ static StringInfoData incoming_message;
 static void WalRcvFetchTimeLineHistoryFiles(TimeLineID first, TimeLineID last);
 static void WalRcvWaitForStartPosition(XLogRecPtr *startpoint, TimeLineID *startpointTLI);
 static void WalRcvDie(int code, Datum arg);
-static void XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len);
-static void XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr);
-static void XLogWalRcvFlush(bool dying);
-static void XLogWalRcvClose(XLogRecPtr recptr);
+static void XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len,
+								 TimeLineID tli);
+static void XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr,
+							TimeLineID tli);
+static void XLogWalRcvFlush(bool dying, TimeLineID tli);
+static void XLogWalRcvClose(XLogRecPtr recptr, TimeLineID tli);
 static void XLogWalRcvSendReply(bool force, bool requestReply);
 static void XLogWalRcvSendHSFeedback(bool immed);
 static void ProcessWalSndrMessage(XLogRecPtr walEnd, TimestampTz sendTime);
@@ -274,7 +277,7 @@ WalReceiverMain(void)
 	pg_atomic_write_u64(&WalRcv->writtenUpto, 0);
 
 	/* Arrange to clean up at walreceiver exit */
-	on_shmem_exit(WalRcvDie, 0);
+	on_shmem_exit(WalRcvDie, PointerGetDatum(&startpointTLI));
 
 	/* Properly accept or ignore signals the postmaster might send us */
 	pqsignal(SIGHUP, SignalHandlerForConfigReload); /* set flag to read config
@@ -390,7 +393,7 @@ WalReceiverMain(void)
 					 "pg_walreceiver_%lld",
 					 (long long int) walrcv_get_backend_pid(wrconn));
 
-			walrcv_create_slot(wrconn, slotname, true, 0, NULL);
+			walrcv_create_slot(wrconn, slotname, true, false, 0, NULL);
 
 			SpinLockAcquire(&walrcv->mutex);
 			strlcpy(walrcv->slotname, slotname, NAMEDATALEN);
@@ -413,7 +416,6 @@ WalReceiverMain(void)
 		options.startpoint = startpoint;
 		options.slotname = slotname[0] != '\0' ? slotname : NULL;
 		options.proto.physical.startpointTLI = startpointTLI;
-		ThisTimeLineID = startpointTLI;
 		if (walrcv_startstreaming(wrconn, &options))
 		{
 			if (first_stream)
@@ -481,7 +483,8 @@ WalReceiverMain(void)
 							 */
 							last_recv_timestamp = GetCurrentTimestamp();
 							ping_sent = false;
-							XLogWalRcvProcessMsg(buf[0], &buf[1], len - 1);
+							XLogWalRcvProcessMsg(buf[0], &buf[1], len - 1,
+												 startpointTLI);
 						}
 						else if (len == 0)
 							break;
@@ -506,7 +509,7 @@ WalReceiverMain(void)
 					 * let the startup process and primary server know about
 					 * them.
 					 */
-					XLogWalRcvFlush(false);
+					XLogWalRcvFlush(false, startpointTLI);
 				}
 
 				/* Check if we need to exit the streaming loop. */
@@ -627,7 +630,7 @@ WalReceiverMain(void)
 		{
 			char		xlogfname[MAXFNAMELEN];
 
-			XLogWalRcvFlush(false);
+			XLogWalRcvFlush(false, startpointTLI);
 			XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);
 			if (close(recvFile) != 0)
 				ereport(PANIC,
@@ -697,7 +700,7 @@ WalRcvWaitForStartPosition(XLogRecPtr *startpoint, TimeLineID *startpointTLI)
 		{
 			/*
 			 * No need to handle changes in primary_conninfo or
-			 * primary_slotname here. Startup process will signal us to
+			 * primary_slot_name here. Startup process will signal us to
 			 * terminate in case those change.
 			 */
 			*startpoint = walrcv->receiveStart;
@@ -795,9 +798,12 @@ static void
 WalRcvDie(int code, Datum arg)
 {
 	WalRcvData *walrcv = WalRcv;
+	TimeLineID *startpointTLI_p = (TimeLineID *) DatumGetPointer(arg);
+
+	Assert(*startpointTLI_p != 0);
 
 	/* Ensure that all WAL records received are flushed to disk */
-	XLogWalRcvFlush(true);
+	XLogWalRcvFlush(true, *startpointTLI_p);
 
 	/* Mark ourselves inactive in shared memory */
 	SpinLockAcquire(&walrcv->mutex);
@@ -827,7 +833,7 @@ WalRcvDie(int code, Datum arg)
  * Accept the message from XLOG stream, and process it.
  */
 static void
-XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)
+XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len, TimeLineID tli)
 {
 	int			hdrlen;
 	XLogRecPtr	dataStart;
@@ -857,7 +863,7 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)
 
 				buf += hdrlen;
 				len -= hdrlen;
-				XLogWalRcvWrite(buf, len, dataStart);
+				XLogWalRcvWrite(buf, len, dataStart, tli);
 				break;
 			}
 		case 'k':				/* Keepalive */
@@ -894,10 +900,12 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)
  * Write XLOG data to disk.
  */
 static void
-XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
+XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr, TimeLineID tli)
 {
 	int			startoff;
 	int			byteswritten;
+
+	Assert(tli != 0);
 
 	while (nbytes > 0)
 	{
@@ -905,16 +913,14 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 
 		/* Close the current segment if it's completed */
 		if (recvFile >= 0 && !XLByteInSeg(recptr, recvSegNo, wal_segment_size))
-			XLogWalRcvClose(recptr);
+			XLogWalRcvClose(recptr, tli);
 
 		if (recvFile < 0)
 		{
-			bool		use_existent = true;
-
 			/* Create/use new log file */
 			XLByteToSeg(recptr, recvSegNo, wal_segment_size);
-			recvFile = XLogFileInit(recvSegNo, &use_existent, true);
-			recvFileTLI = ThisTimeLineID;
+			recvFile = XLogFileInit(recvSegNo, tli);
+			recvFileTLI = tli;
 		}
 
 		/* Calculate the start offset of the received logs */
@@ -967,7 +973,7 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 	 * segment is received and written.
 	 */
 	if (recvFile >= 0 && !XLByteInSeg(recptr, recvSegNo, wal_segment_size))
-		XLogWalRcvClose(recptr);
+		XLogWalRcvClose(recptr, tli);
 }
 
 /*
@@ -977,13 +983,15 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
  * an error, so we skip sending a reply in that case.
  */
 static void
-XLogWalRcvFlush(bool dying)
+XLogWalRcvFlush(bool dying, TimeLineID tli)
 {
+	Assert(tli != 0);
+
 	if (LogstreamResult.Flush < LogstreamResult.Write)
 	{
 		WalRcvData *walrcv = WalRcv;
 
-		issue_xlog_fsync(recvFile, recvSegNo);
+		issue_xlog_fsync(recvFile, recvSegNo, tli);
 
 		LogstreamResult.Flush = LogstreamResult.Write;
 
@@ -993,7 +1001,7 @@ XLogWalRcvFlush(bool dying)
 		{
 			walrcv->latestChunkStart = walrcv->flushedUpto;
 			walrcv->flushedUpto = LogstreamResult.Flush;
-			walrcv->receivedTLI = ThisTimeLineID;
+			walrcv->receivedTLI = tli;
 		}
 		SpinLockRelease(&walrcv->mutex);
 
@@ -1030,17 +1038,18 @@ XLogWalRcvFlush(bool dying)
  * Create an archive notification file since the segment is known completed.
  */
 static void
-XLogWalRcvClose(XLogRecPtr recptr)
+XLogWalRcvClose(XLogRecPtr recptr, TimeLineID tli)
 {
 	char		xlogfname[MAXFNAMELEN];
 
 	Assert(recvFile >= 0 && !XLByteInSeg(recptr, recvSegNo, wal_segment_size));
+	Assert(tli != 0);
 
 	/*
 	 * fsync() and close current file before we switch to next one. We would
 	 * otherwise have to reopen this file to fsync it later
 	 */
-	XLogWalRcvFlush(false);
+	XLogWalRcvFlush(false, tli);
 
 	XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);
 
@@ -1413,12 +1422,12 @@ pg_stat_get_wal_receiver(PG_FUNCTION_ARGS)
 	/* Fetch values */
 	values[0] = Int32GetDatum(pid);
 
-	if (!is_member_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS))
+	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS))
 	{
 		/*
-		 * Only superusers and members of pg_read_all_stats can see details.
-		 * Other users only get the pid value to know whether it is a WAL
-		 * receiver, but no details.
+		 * Only superusers and roles with privileges of pg_read_all_stats can
+		 * see details. Other users only get the pid value to know whether it
+		 * is a WAL receiver, but no details.
 		 */
 		MemSet(&nulls[1], true, sizeof(bool) * (tupdesc->natts - 1));
 	}

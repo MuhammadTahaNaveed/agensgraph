@@ -181,7 +181,7 @@
  * 7) Mark state 3 final because state 5 of source NFA is marked as final.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -541,9 +541,11 @@ createTrgmNFA(text *text_re, Oid collation,
 	 * Stage 1: Compile the regexp into a NFA, using the regexp library.
 	 */
 #ifdef IGNORECASE
-	RE_compile(&regex, text_re, REG_ADVANCED | REG_ICASE, collation);
+	RE_compile(&regex, text_re,
+			   REG_ADVANCED | REG_NOSUB | REG_ICASE, collation);
 #else
-	RE_compile(&regex, text_re, REG_ADVANCED, collation);
+	RE_compile(&regex, text_re,
+			   REG_ADVANCED | REG_NOSUB, collation);
 #endif
 
 	/*
@@ -1944,9 +1946,7 @@ packGraph(TrgmNFA *trgmNFA, MemoryContext rcontext)
 				arcsCount;
 	HASH_SEQ_STATUS scan_status;
 	TrgmState  *state;
-	TrgmPackArcInfo *arcs,
-			   *p1,
-			   *p2;
+	TrgmPackArcInfo *arcs;
 	TrgmPackedArc *packedArcs;
 	TrgmPackedGraph *result;
 	int			i,
@@ -2018,17 +2018,25 @@ packGraph(TrgmNFA *trgmNFA, MemoryContext rcontext)
 	qsort(arcs, arcIndex, sizeof(TrgmPackArcInfo), packArcInfoCmp);
 
 	/* We could have duplicates because states were merged. Remove them. */
-	/* p1 is probe point, p2 is last known non-duplicate. */
-	p2 = arcs;
-	for (p1 = arcs + 1; p1 < arcs + arcIndex; p1++)
+	if (arcIndex > 1)
 	{
-		if (packArcInfoCmp(p1, p2) > 0)
+		/* p1 is probe point, p2 is last known non-duplicate. */
+		TrgmPackArcInfo *p1,
+				   *p2;
+
+		p2 = arcs;
+		for (p1 = arcs + 1; p1 < arcs + arcIndex; p1++)
 		{
-			p2++;
-			*p2 = *p1;
+			if (packArcInfoCmp(p1, p2) > 0)
+			{
+				p2++;
+				*p2 = *p1;
+			}
 		}
+		arcsCount = (p2 - arcs) + 1;
 	}
-	arcsCount = (p2 - arcs) + 1;
+	else
+		arcsCount = arcIndex;
 
 	/* Create packed representation */
 	result = (TrgmPackedGraph *)

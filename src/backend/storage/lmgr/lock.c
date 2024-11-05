@@ -22,7 +22,7 @@
  * lock.c
  *	  POSTGRES primary lock mechanism
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -56,6 +56,7 @@
 #include "access/twophase_rmgr.h"
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "access/xlogutils.h"
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "pgstat.h"
@@ -142,7 +143,7 @@ static bool Dummy_trace = false;
 #endif
 
 static const LockMethodData default_lockmethod = {
-	AccessExclusiveLock,		/* highest valid lock mode number */
+	MaxLockMode,
 	LockConflicts,
 	lock_mode_names,
 #ifdef LOCK_DEBUG
@@ -153,7 +154,7 @@ static const LockMethodData default_lockmethod = {
 };
 
 static const LockMethodData user_lockmethod = {
-	AccessExclusiveLock,		/* highest valid lock mode number */
+	MaxLockMode,
 	LockConflicts,
 	lock_mode_names,
 #ifdef LOCK_DEBUG
@@ -203,18 +204,6 @@ static int	FastPathLocalUseCount = 0;
  * released.
  */
 static bool IsRelationExtensionLockHeld PG_USED_FOR_ASSERTS_ONLY = false;
-
-/*
- * Flag to indicate if the page lock is held by this backend.  We don't
- * acquire any other heavyweight lock while holding the page lock except for
- * relation extension.  However, these locks are never taken in reverse order
- * which implies that page locks will also never participate in the deadlock
- * cycle.
- *
- * Similar to relation extension, page locks are also held for a short
- * duration, so imposing such a restriction won't hurt.
- */
-static bool IsPageLockHeld PG_USED_FOR_ASSERTS_ONLY = false;
 
 /* Macros for manipulating proc->fpLockBits */
 #define FAST_PATH_BITS_PER_SLOT			3
@@ -609,11 +598,17 @@ DoLockModesConflict(LOCKMODE mode1, LOCKMODE mode2)
 }
 
 /*
- * LockHeldByMe -- test whether lock 'locktag' is held with mode 'lockmode'
- *		by the current transaction
+ * LockHeldByMeExtended -- test whether lock 'locktag' is held by the current
+ *		transaction
+ *
+ * Returns true if current transaction holds a lock on 'tag' of mode
+ * 'lockmode'.  If 'orstronger' is true, a stronger lockmode is also OK.
+ * ("Stronger" is defined as "numerically higher", which is a bit
+ * semantically dubious but is OK for the purposes we use this for.)
  */
-bool
-LockHeldByMe(const LOCKTAG *locktag, LOCKMODE lockmode)
+static bool
+LockHeldByMeExtended(const LOCKTAG *locktag,
+					 LOCKMODE lockmode, bool orstronger)
 {
 	LOCALLOCKTAG localtag;
 	LOCALLOCK  *locallock;
@@ -629,7 +624,35 @@ LockHeldByMe(const LOCKTAG *locktag, LOCKMODE lockmode)
 										  (void *) &localtag,
 										  HASH_FIND, NULL);
 
-	return (locallock && locallock->nLocks > 0);
+	if (locallock && locallock->nLocks > 0)
+		return true;
+
+	if (orstronger)
+	{
+		LOCKMODE	slockmode;
+
+		for (slockmode = lockmode + 1;
+			 slockmode <= MaxLockMode;
+			 slockmode++)
+		{
+			if (LockHeldByMeExtended(locktag, slockmode, false))
+				return true;
+		}
+	}
+
+	return false;
+}
+
+bool
+LockHeldByMe(const LOCKTAG *locktag, LOCKMODE lockmode)
+{
+	return LockHeldByMeExtended(locktag, lockmode, false);
+}
+
+bool
+LockOrStrongerHeldByMe(const LOCKTAG *locktag, LOCKMODE lockmode)
+{
+	return LockHeldByMeExtended(locktag, lockmode, true);
 }
 
 #ifdef USE_ASSERT_CHECKING
@@ -903,13 +926,6 @@ LockAcquireExtended(const LOCKTAG *locktag,
 	 * lock more than once but that case won't reach here.
 	 */
 	Assert(!IsRelationExtensionLockHeld);
-
-	/*
-	 * We don't acquire any other heavyweight lock while holding the page lock
-	 * except for relation extension.
-	 */
-	Assert(!IsPageLockHeld ||
-		   (locktag->locktag_type == LOCKTAG_RELATION_EXTEND));
 
 	/*
 	 * Prepare to emit a WAL record if acquisition of this lock needs to be
@@ -1359,10 +1375,10 @@ SetupLockInTable(LockMethod lockMethodTable, PGPROC *proc,
 }
 
 /*
- * Check and set/reset the flag that we hold the relation extension/page lock.
+ * Check and set/reset the flag that we hold the relation extension lock.
  *
  * It is callers responsibility that this function is called after
- * acquiring/releasing the relation extension/page lock.
+ * acquiring/releasing the relation extension lock.
  *
  * Pass acquired as true if lock is acquired, false otherwise.
  */
@@ -1372,9 +1388,6 @@ CheckAndSetLockHeld(LOCALLOCK *locallock, bool acquired)
 #ifdef USE_ASSERT_CHECKING
 	if (LOCALLOCK_LOCKTAG(*locallock) == LOCKTAG_RELATION_EXTEND)
 		IsRelationExtensionLockHeld = acquired;
-	else if (LOCALLOCK_LOCKTAG(*locallock) == LOCKTAG_PAGE)
-		IsPageLockHeld = acquired;
-
 #endif
 }
 
@@ -1500,11 +1513,9 @@ LockCheckConflicts(LockMethod lockMethodTable,
 	}
 
 	/*
-	 * The relation extension or page lock conflict even between the group
-	 * members.
+	 * The relation extension lock conflict even between the group members.
 	 */
-	if (LOCK_LOCKTAG(*lock) == LOCKTAG_RELATION_EXTEND ||
-		(LOCK_LOCKTAG(*lock) == LOCKTAG_PAGE))
+	if (LOCK_LOCKTAG(*lock) == LOCKTAG_RELATION_EXTEND)
 	{
 		PROCLOCK_PRINT("LockCheckConflicts: conflicting (group)",
 					   proclock);
@@ -2285,6 +2296,16 @@ LockReleaseAll(LOCKMETHODID lockmethodid, bool allLocks)
 			else
 				locallock->numLockOwners = 0;
 		}
+
+#ifdef USE_ASSERT_CHECKING
+
+		/*
+		 * Tuple locks are currently held only for short durations within a
+		 * transaction. Check that we didn't forget to release one.
+		 */
+		if (LOCALLOCK_LOCKTAG(*locallock) == LOCKTAG_TUPLE && !allLocks)
+			elog(WARNING, "tuple lock held at commit");
+#endif
 
 		/*
 		 * If the lock or proclock pointers are NULL, this lock was taken via

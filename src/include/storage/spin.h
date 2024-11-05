@@ -60,7 +60,7 @@
  *	be again.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/spin.h
@@ -90,7 +90,7 @@ extern Size SpinlockSemaSize(void);
 
 #ifndef HAVE_SPINLOCKS
 extern void SpinlockSemaInit(void);
-extern PGSemaphore *SpinlockSemaArray;
+extern PGDLLIMPORT PGSemaphore *SpinlockSemaArray;
 #endif
 
 #endif							/* SPIN_H */

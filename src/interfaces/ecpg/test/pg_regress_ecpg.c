@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*-------------------------------------------------------------------------
  *
  * pg_regress_ecpg --- regression test driver for ecpg
@@ -27,7 +8,7 @@
  *
  * This code is released under the terms of the PostgreSQL License.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/interfaces/ecpg/test/pg_regress_ecpg.c
@@ -185,9 +166,14 @@ ecpg_start_test(const char *testname,
 	snprintf(inprg, sizeof(inprg), "%s/%s", inputdir, testname);
 	snprintf(insource, sizeof(insource), "%s.c", testname);
 
+	/* make a version of the test name that has dashes in place of slashes */
 	initStringInfo(&testname_dash);
 	appendStringInfoString(&testname_dash, testname);
-	replace_string(&testname_dash, "/", "-");
+	for (char *c = testname_dash.data; *c != '\0'; c++)
+	{
+		if (*c == '/')
+			*c = '-';
+	}
 
 	snprintf(expectfile_stdout, sizeof(expectfile_stdout),
 			 "%s/expected/%s.stdout",

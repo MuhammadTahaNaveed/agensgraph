@@ -45,7 +45,7 @@
  *	before ExecutorEnd.  This can be omitted only in case of EXPLAIN,
  *	which should also omit ExecutorRun.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -62,7 +62,9 @@
 #include "access/tableam.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "catalog/catalog.h"
 #include "catalog/namespace.h"
+#include "catalog/partition.h"
 #include "catalog/pg_publication.h"
 #include "commands/matview.h"
 #include "commands/trigger.h"
@@ -152,10 +154,12 @@ void
 ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	/*
-	 * In some cases (e.g. an EXECUTE statement) a query execution will skip
-	 * parse analysis, which means that the query_id won't be reported.  Note
-	 * that it's harmless to report the query_id multiple time, as the call
-	 * will be ignored if the top level query_id has already been reported.
+	 * In some cases (e.g. an EXECUTE statement or an execute message with the
+	 * extended query protocol) the query_id won't be reported, so do it now.
+	 *
+	 * Note that it's harmless to report the query_id multiple times, as the
+	 * call will be ignored if the top level query_id has already been
+	 * reported.
 	 */
 	pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
 
@@ -256,6 +260,7 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 		case CMD_DELETE:
 		case CMD_UPDATE:
 		case CMD_GRAPHWRITE:
+		case CMD_MERGE:
 			estate->es_output_cid = GetCurrentCommandId(true);
 			break;
 
@@ -1033,6 +1038,10 @@ CheckValidResultRel(ResultRelInfo *resultRelInfo, CmdType operation)
 	TriggerDesc *trigDesc = resultRel->trigdesc;
 	FdwRoutine *fdwroutine;
 
+	/* Expect a fully-formed ResultRelInfo from InitResultRelInfo(). */
+	Assert(resultRelInfo->ri_needLockTagTuple ==
+		   IsInplaceUpdateRelation(resultRel));
+
 	switch (resultRel->rd_rel->relkind)
 	{
 		case RELKIND_RELATION:
@@ -1241,6 +1250,8 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	resultRelInfo->ri_NumIndices = 0;
 	resultRelInfo->ri_IndexRelationDescs = NULL;
 	resultRelInfo->ri_IndexRelationInfo = NULL;
+	resultRelInfo->ri_needLockTagTuple =
+		IsInplaceUpdateRelation(resultRelationDesc);
 	/* make a copy so as not to depend on relcache info not changing... */
 	resultRelInfo->ri_TrigDesc = CopyTriggerDesc(resultRelationDesc->trigdesc);
 	if (resultRelInfo->ri_TrigDesc)
@@ -1281,6 +1292,8 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	resultRelInfo->ri_ReturningSlot = NULL;
 	resultRelInfo->ri_TrigOldSlot = NULL;
 	resultRelInfo->ri_TrigNewSlot = NULL;
+	resultRelInfo->ri_matchedMergeAction = NIL;
+	resultRelInfo->ri_notMatchedMergeAction = NIL;
 
 	/*
 	 * Only ExecInitPartitionInfo() and ExecInitPartitionDispatchInfo() pass
@@ -1317,7 +1330,8 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
  * in es_trig_target_relations.
  */
 ResultRelInfo *
-ExecGetTriggerResultRel(EState *estate, Oid relid)
+ExecGetTriggerResultRel(EState *estate, Oid relid,
+						ResultRelInfo *rootRelInfo)
 {
 	ResultRelInfo *rInfo;
 	ListCell   *l;
@@ -1368,7 +1382,7 @@ ExecGetTriggerResultRel(EState *estate, Oid relid)
 	InitResultRelInfo(rInfo,
 					  rel,
 					  0,		/* dummy rangetable index */
-					  NULL,
+					  rootRelInfo,
 					  estate->es_instrument);
 	estate->es_trig_target_relations =
 		lappend(estate->es_trig_target_relations, rInfo);
@@ -1380,6 +1394,69 @@ ExecGetTriggerResultRel(EState *estate, Oid relid)
 	 */
 
 	return rInfo;
+}
+
+/*
+ * Return the ancestor relations of a given leaf partition result relation
+ * up to and including the query's root target relation.
+ *
+ * These work much like the ones opened by ExecGetTriggerResultRel, except
+ * that we need to keep them in a separate list.
+ *
+ * These are closed by ExecCloseResultRelations.
+ */
+List *
+ExecGetAncestorResultRels(EState *estate, ResultRelInfo *resultRelInfo)
+{
+	ResultRelInfo *rootRelInfo = resultRelInfo->ri_RootResultRelInfo;
+	Relation	partRel = resultRelInfo->ri_RelationDesc;
+	Oid			rootRelOid;
+
+	if (!partRel->rd_rel->relispartition)
+		elog(ERROR, "cannot find ancestors of a non-partition result relation");
+	Assert(rootRelInfo != NULL);
+	rootRelOid = RelationGetRelid(rootRelInfo->ri_RelationDesc);
+	if (resultRelInfo->ri_ancestorResultRels == NIL)
+	{
+		ListCell   *lc;
+		List	   *oids = get_partition_ancestors(RelationGetRelid(partRel));
+		List	   *ancResultRels = NIL;
+
+		foreach(lc, oids)
+		{
+			Oid			ancOid = lfirst_oid(lc);
+			Relation	ancRel;
+			ResultRelInfo *rInfo;
+
+			/*
+			 * Ignore the root ancestor here, and use ri_RootResultRelInfo
+			 * (below) for it instead.  Also, we stop climbing up the
+			 * hierarchy when we find the table that was mentioned in the
+			 * query.
+			 */
+			if (ancOid == rootRelOid)
+				break;
+
+			/*
+			 * All ancestors up to the root target relation must have been
+			 * locked by the planner or AcquireExecutorLocks().
+			 */
+			ancRel = table_open(ancOid, NoLock);
+			rInfo = makeNode(ResultRelInfo);
+
+			/* dummy rangetable index */
+			InitResultRelInfo(rInfo, ancRel, 0, NULL,
+							  estate->es_instrument);
+			ancResultRels = lappend(ancResultRels, rInfo);
+		}
+		ancResultRels = lappend(ancResultRels, rootRelInfo);
+		resultRelInfo->ri_ancestorResultRels = ancResultRels;
+	}
+
+	/* We must have found some ancestor */
+	Assert(resultRelInfo->ri_ancestorResultRels != NIL);
+
+	return resultRelInfo->ri_ancestorResultRels;
 }
 
 /* ----------------------------------------------------------------
@@ -1481,12 +1558,29 @@ ExecCloseResultRelations(EState *estate)
 	/*
 	 * close indexes of result relation(s) if any.  (Rels themselves are
 	 * closed in ExecCloseRangeTableRelations())
+	 *
+	 * In addition, close the stub RTs that may be in each resultrel's
+	 * ri_ancestorResultRels.
 	 */
 	foreach(l, estate->es_opened_result_relations)
 	{
 		ResultRelInfo *resultRelInfo = lfirst(l);
+		ListCell   *lc;
 
 		ExecCloseIndices(resultRelInfo);
+		foreach(lc, resultRelInfo->ri_ancestorResultRels)
+		{
+			ResultRelInfo *rInfo = lfirst(lc);
+
+			/*
+			 * Ancestors with RTI > 0 (should only be the root ancestor) are
+			 * closed by ExecCloseRangeTableRelations.
+			 */
+			if (rInfo->ri_RangeTableIndex > 0)
+				continue;
+
+			table_close(rInfo->ri_RelationDesc, NoLock);
+		}
 	}
 
 	/* Close any relations that have been opened by ExecGetTriggerResultRel(). */
@@ -2098,6 +2192,19 @@ ExecWithCheckOptions(WCOKind kind, ResultRelInfo *resultRelInfo,
 								 errmsg("new row violates row-level security policy for table \"%s\"",
 										wco->relname)));
 					break;
+				case WCO_RLS_MERGE_UPDATE_CHECK:
+				case WCO_RLS_MERGE_DELETE_CHECK:
+					if (wco->polname != NULL)
+						ereport(ERROR,
+								(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+								 errmsg("target row violates row-level security policy \"%s\" (USING expression) for table \"%s\"",
+										wco->polname, wco->relname)));
+					else
+						ereport(ERROR,
+								(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+								 errmsg("target row violates row-level security policy (USING expression) for table \"%s\"",
+										wco->relname)));
+					break;
 				case WCO_RLS_CONFLICT_CHECK:
 					if (wco->polname != NULL)
 						ereport(ERROR,
@@ -2381,7 +2488,7 @@ ExecBuildAuxRowMark(ExecRowMark *erm, List *targetlist)
  *	relation - table containing tuple
  *	rti - rangetable index of table containing tuple
  *	inputslot - tuple for processing - this can be the slot from
- *		EvalPlanQualSlot(), for the increased efficiency.
+ *		EvalPlanQualSlot() for this rel, for increased efficiency.
  *
  * This tests whether the tuple in inputslot still matches the relevant
  * quals. For that result to be useful, typically the input tuple has to be
@@ -2416,6 +2523,14 @@ EvalPlanQual(EPQState *epqstate, Relation relation,
 		ExecCopySlot(testslot, inputslot);
 
 	/*
+	 * Mark that an EPQ tuple is available for this relation.  (If there is
+	 * more than one result relation, the others remain marked as having no
+	 * tuple available.)
+	 */
+	epqstate->relsubs_done[rti - 1] = false;
+	epqstate->epqExtra->relsubs_blocked[rti - 1] = false;
+
+	/*
 	 * Run the EPQ query.  We assume it will return at most one tuple.
 	 */
 	slot = EvalPlanQualNext(epqstate);
@@ -2431,11 +2546,12 @@ EvalPlanQual(EPQState *epqstate, Relation relation,
 		ExecMaterializeSlot(slot);
 
 	/*
-	 * Clear out the test tuple.  This is needed in case the EPQ query is
-	 * re-used to test a tuple for a different relation.  (Not clear that can
-	 * really happen, but let's be safe.)
+	 * Clear out the test tuple, and mark that no tuple is available here.
+	 * This is needed in case the EPQ state is re-used to test a tuple for a
+	 * different target relation.
 	 */
 	ExecClearTuple(testslot);
+	epqstate->epqExtra->relsubs_blocked[rti - 1] = true;
 
 	return slot;
 }
@@ -2451,11 +2567,33 @@ void
 EvalPlanQualInit(EPQState *epqstate, EState *parentestate,
 				 Plan *subplan, List *auxrowmarks, int epqParam)
 {
+	EvalPlanQualInitExt(epqstate, parentestate,
+						subplan, auxrowmarks, epqParam, NIL);
+}
+
+/*
+ * EvalPlanQualInitExt -- same, but allow specification of resultRelations
+ *
+ * If the caller intends to use EvalPlanQual(), resultRelations should be
+ * a list of RT indexes of potential target relations for EvalPlanQual(),
+ * and we will arrange that the other listed relations don't return any
+ * tuple during an EvalPlanQual() call.  Otherwise resultRelations
+ * should be NIL.
+ */
+void
+EvalPlanQualInitExt(EPQState *epqstate, EState *parentestate,
+					Plan *subplan, List *auxrowmarks,
+					int epqParam, List *resultRelations)
+{
 	Index		rtsize = parentestate->es_range_table_size;
+
+	/* create some extra space to avoid ABI break */
+	epqstate->epqExtra = (EPQStateExtra *) palloc(sizeof(EPQStateExtra));
 
 	/* initialize data not changing over EPQState's lifetime */
 	epqstate->parentestate = parentestate;
 	epqstate->epqParam = epqParam;
+	epqstate->epqExtra->resultRelations = resultRelations;
 
 	/*
 	 * Allocate space to reference a slot for each potential rti - do so now
@@ -2464,7 +2602,7 @@ EvalPlanQualInit(EPQState *epqstate, EState *parentestate,
 	 * that *may* need EPQ later, without forcing the overhead of
 	 * EvalPlanQualBegin().
 	 */
-	epqstate->tuple_table = NIL;
+	epqstate->epqExtra->tuple_table = NIL;
 	epqstate->relsubs_slot = (TupleTableSlot **)
 		palloc0(rtsize * sizeof(TupleTableSlot *));
 
@@ -2478,6 +2616,7 @@ EvalPlanQualInit(EPQState *epqstate, EState *parentestate,
 	epqstate->recheckplanstate = NULL;
 	epqstate->relsubs_rowmark = NULL;
 	epqstate->relsubs_done = NULL;
+	epqstate->epqExtra->relsubs_blocked = NULL;
 }
 
 /*
@@ -2518,7 +2657,7 @@ EvalPlanQualSlot(EPQState *epqstate,
 		MemoryContext oldcontext;
 
 		oldcontext = MemoryContextSwitchTo(epqstate->parentestate->es_query_cxt);
-		*slot = table_slot_create(relation, &epqstate->tuple_table);
+		*slot = table_slot_create(relation, &epqstate->epqExtra->tuple_table);
 		MemoryContextSwitchTo(oldcontext);
 	}
 
@@ -2675,7 +2814,13 @@ EvalPlanQualBegin(EPQState *epqstate)
 		Index		rtsize = parentestate->es_range_table_size;
 		PlanState  *rcplanstate = epqstate->recheckplanstate;
 
-		MemSet(epqstate->relsubs_done, 0, rtsize * sizeof(bool));
+		/*
+		 * Reset the relsubs_done[] flags to equal relsubs_blocked[], so that
+		 * the EPQ run will never attempt to fetch tuples from blocked target
+		 * relations.
+		 */
+		memcpy(epqstate->relsubs_done, epqstate->epqExtra->relsubs_blocked,
+			   rtsize * sizeof(bool));
 
 		/* Recopy current values of parent parameters */
 		if (parentestate->es_plannedstmt->paramExecTypes != NIL)
@@ -2842,10 +2987,22 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	}
 
 	/*
-	 * Initialize per-relation EPQ tuple states to not-fetched.
+	 * Initialize per-relation EPQ tuple states.  Result relations, if any,
+	 * get marked as blocked; others as not-fetched.
 	 */
-	epqstate->relsubs_done = (bool *)
-		palloc0(rtsize * sizeof(bool));
+	epqstate->relsubs_done = palloc_array(bool, rtsize);
+	epqstate->epqExtra->relsubs_blocked = palloc0_array(bool, rtsize);
+
+	foreach(l, epqstate->epqExtra->resultRelations)
+	{
+		int			rtindex = lfirst_int(l);
+
+		Assert(rtindex > 0 && rtindex <= rtsize);
+		epqstate->epqExtra->relsubs_blocked[rtindex - 1] = true;
+	}
+
+	memcpy(epqstate->relsubs_done, epqstate->epqExtra->relsubs_blocked,
+		   rtsize * sizeof(bool));
 
 	/*
 	 * Initialize the private state information for all the nodes in the part
@@ -2882,12 +3039,12 @@ EvalPlanQualEnd(EPQState *epqstate)
 	 * We may have a tuple table, even if EPQ wasn't started, because we allow
 	 * use of EvalPlanQualSlot() without calling EvalPlanQualBegin().
 	 */
-	if (epqstate->tuple_table != NIL)
+	if (epqstate->epqExtra->tuple_table != NIL)
 	{
 		memset(epqstate->relsubs_slot, 0,
 			   rtsize * sizeof(TupleTableSlot *));
-		ExecResetTupleTable(epqstate->tuple_table, true);
-		epqstate->tuple_table = NIL;
+		ExecResetTupleTable(epqstate->epqExtra->tuple_table, true);
+		epqstate->epqExtra->tuple_table = NIL;
 	}
 
 	/* EPQ wasn't started, nothing further to do */
@@ -2921,4 +3078,5 @@ EvalPlanQualEnd(EPQState *epqstate)
 	epqstate->recheckplanstate = NULL;
 	epqstate->relsubs_rowmark = NULL;
 	epqstate->relsubs_done = NULL;
+	epqstate->epqExtra->relsubs_blocked = NULL;
 }

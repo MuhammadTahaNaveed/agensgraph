@@ -6067,7 +6067,7 @@ getExprField(Expr *expr, char *fname)
 	Oid			typoid;
 	TupleDesc	tupdesc;
 	int			idx;
-	Form_pg_attribute attr;
+	Form_pg_attribute attr = NULL;
 	FieldSelect *fselect;
 
 	typoid = exprType((Node *) expr);
@@ -6080,6 +6080,7 @@ getExprField(Expr *expr, char *fname)
 		if (namestrcmp(&attr->attname, fname) == 0)
 			break;
 	}
+	Assert(attr);
 	Assert(idx < tupdesc->natts);
 
 	fselect = makeNode(FieldSelect);
@@ -6121,7 +6122,7 @@ makeNullAConst(void)
 	A_Const    *nullconst;
 
 	nullconst = makeNode(A_Const);
-	nullconst->val.type = T_Null;
+	nullconst->isnull = true;
 	nullconst->location = -1;
 
 	return nullconst;
@@ -6136,8 +6137,7 @@ IsNullAConst(Node *arg)
 	{
 		A_Const    *con = (A_Const *) arg;
 
-		if (con->val.type == T_Null)
-			return true;
+		return con->isnull;
 	}
 	return false;
 }

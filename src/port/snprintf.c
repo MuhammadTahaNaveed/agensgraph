@@ -21,7 +21,7 @@
  * Copyright (c) 1983, 1995, 1996 Eric P. Allman
  * Copyright (c) 1988, 1993
  *	The Regents of the University of California.  All rights reserved.
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -127,6 +127,16 @@
 #undef	fprintf
 #undef	vprintf
 #undef	printf
+
+/*
+ * We use the platform's native snprintf() for some machine-dependent cases.
+ * While that's required by C99, Microsoft Visual Studio lacks it before
+ * VS2015.  Fortunately, we don't really need the length check in practice,
+ * so just fall back to native sprintf() on that platform.
+ */
+#if defined(_MSC_VER) && _MSC_VER < 1900	/* pre-VS2015 */
+#define snprintf(str,size,...) sprintf(str,__VA_ARGS__)
+#endif
 
 /*
  * Info about where the formatted output is going.
@@ -1034,8 +1044,8 @@ fmtint(long long value, char type, int forcesign, int leftjust,
 	   int minlen, int zpad, int precision, int pointflag,
 	   PrintfTarget *target)
 {
-	unsigned long long base;
 	unsigned long long uvalue;
+	int			base;
 	int			dosign;
 	const char *cvt = "0123456789abcdef";
 	int			signvalue = 0;
@@ -1094,12 +1104,36 @@ fmtint(long long value, char type, int forcesign, int leftjust,
 		vallen = 0;
 	else
 	{
-		/* make integer string */
-		do
+		/*
+		 * Convert integer to string.  We special-case each of the possible
+		 * base values so as to avoid general-purpose divisions.  On most
+		 * machines, division by a fixed constant can be done much more
+		 * cheaply than a general divide.
+		 */
+		if (base == 10)
 		{
-			convert[sizeof(convert) - (++vallen)] = cvt[uvalue % base];
-			uvalue = uvalue / base;
-		} while (uvalue);
+			do
+			{
+				convert[sizeof(convert) - (++vallen)] = cvt[uvalue % 10];
+				uvalue = uvalue / 10;
+			} while (uvalue);
+		}
+		else if (base == 16)
+		{
+			do
+			{
+				convert[sizeof(convert) - (++vallen)] = cvt[uvalue % 16];
+				uvalue = uvalue / 16;
+			} while (uvalue);
+		}
+		else					/* base == 8 */
+		{
+			do
+			{
+				convert[sizeof(convert) - (++vallen)] = cvt[uvalue % 8];
+				uvalue = uvalue / 8;
+			} while (uvalue);
+		}
 	}
 
 	zeropad = Max(0, precision - vallen);

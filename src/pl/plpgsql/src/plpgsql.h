@@ -22,7 +22,7 @@
  * plpgsql.h		- Definitions for the PL/pgSQL
  *			  procedural language
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -912,10 +912,10 @@ typedef struct PLpgSQL_stmt_execsql
 	int			lineno;
 	unsigned int stmtid;
 	PLpgSQL_expr *sqlstmt;
-	bool		mod_stmt;		/* is the stmt INSERT/UPDATE/DELETE? */
+	bool		mod_stmt;		/* is the stmt INSERT/UPDATE/DELETE/MERGE? */
+	bool		mod_stmt_set;	/* is mod_stmt valid yet? */
 	bool		into;			/* INTO supplied? */
 	bool		strict;			/* INTO STRICT flag */
-	bool		mod_stmt_set;	/* is mod_stmt valid yet? */
 	PLpgSQL_variable *target;	/* INTO target (record or row) */
 } PLpgSQL_stmt_execsql;
 
@@ -1094,7 +1094,7 @@ typedef struct PLpgSQL_execstate
 
 	/* lookup table to use for executing type casts */
 	HTAB	   *cast_hash;
-	MemoryContext cast_hash_context;
+	MemoryContext cast_hash_context;	/* not used; now always NULL */
 
 	/* memory context for statement-lifespan temporary values */
 	MemoryContext stmt_mcontext;	/* current stmt context, or NULL if none */
@@ -1107,6 +1107,7 @@ typedef struct PLpgSQL_execstate
 
 	/* status information for error context reporting */
 	PLpgSQL_stmt *err_stmt;		/* current stmt */
+	PLpgSQL_variable *err_var;	/* current variable, if in a DECLARE section */
 	const char *err_text;		/* additional state info */
 
 	void	   *plugin_info;	/* reserved for use by optional plugin */
@@ -1118,8 +1119,6 @@ typedef struct PLpgSQL_execstate
  * variable "PLpgSQL_plugin" and set it to point to a PLpgSQL_plugin struct.
  * Typically the struct could just be static data in the plugin library.
  * We expect that a plugin would do this at library load time (_PG_init()).
- * It must also be careful to set the rendezvous variable back to NULL
- * if it is unloaded (_PG_fini()).
  *
  * This structure is basically a collection of function pointers --- at
  * various interesting points in pl_exec.c, we call these functions
@@ -1138,9 +1137,17 @@ typedef struct PLpgSQL_execstate
  * statement.
  *
  * Also, immediately before any call to func_setup, PL/pgSQL fills in the
- * error_callback and assign_expr fields with pointers to its own
- * plpgsql_exec_error_callback and exec_assign_expr functions.  This is
- * a somewhat ad-hoc expedient to simplify life for debugger plugins.
+ * remaining fields with pointers to some of its own functions, allowing the
+ * plugin to invoke those functions conveniently.  The exposed functions are:
+ *		plpgsql_exec_error_callback
+ *		exec_assign_expr
+ *		exec_assign_value
+ *		exec_eval_datum
+ *		exec_cast_value
+ * (plpgsql_exec_error_callback is not actually meant to be called by the
+ * plugin, but rather to allow it to identify PL/pgSQL error context stack
+ * frames.  The others are useful for debugger-like plugins to examine and
+ * set variables.)
  */
 typedef struct PLpgSQL_plugin
 {
@@ -1153,8 +1160,20 @@ typedef struct PLpgSQL_plugin
 
 	/* Function pointers set by PL/pgSQL itself */
 	void		(*error_callback) (void *arg);
-	void		(*assign_expr) (PLpgSQL_execstate *estate, PLpgSQL_datum *target,
+	void		(*assign_expr) (PLpgSQL_execstate *estate,
+								PLpgSQL_datum *target,
 								PLpgSQL_expr *expr);
+	void		(*assign_value) (PLpgSQL_execstate *estate,
+								 PLpgSQL_datum *target,
+								 Datum value, bool isNull,
+								 Oid valtype, int32 valtypmod);
+	void		(*eval_datum) (PLpgSQL_execstate *estate, PLpgSQL_datum *datum,
+							   Oid *typeId, int32 *typetypmod,
+							   Datum *value, bool *isnull);
+	Datum		(*cast_value) (PLpgSQL_execstate *estate,
+							   Datum value, bool *isnull,
+							   Oid valtype, int32 valtypmod,
+							   Oid reqtype, int32 reqtypmod);
 } PLpgSQL_plugin;
 
 /*
@@ -1321,6 +1340,7 @@ extern void plpgsql_dumptree(PLpgSQL_function *func);
  */
 extern int	plpgsql_base_yylex(void);
 extern int	plpgsql_yylex(void);
+extern int	plpgsql_token_length(void);
 extern void plpgsql_push_back_token(int token);
 extern bool plpgsql_token_is_unreserved_keyword(int token);
 extern void plpgsql_append_source_text(StringInfo buf,

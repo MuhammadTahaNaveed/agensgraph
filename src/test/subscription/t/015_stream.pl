@@ -1,22 +1,22 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # Test streaming of simple large transaction
 use strict;
 use warnings;
-use PostgresNode;
-use TestLib;
-use Test::More tests => 4;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
+use Test::More;
 
 # Create publisher node
-my $node_publisher = get_new_node('publisher');
+my $node_publisher = PostgreSQL::Test::Cluster->new('publisher');
 $node_publisher->init(allows_streaming => 'logical');
 $node_publisher->append_conf('postgresql.conf',
 	'logical_decoding_work_mem = 64kB');
 $node_publisher->start;
 
 # Create subscriber node
-my $node_subscriber = get_new_node('subscriber');
+my $node_subscriber = PostgreSQL::Test::Cluster->new('subscriber');
 $node_subscriber->init(allows_streaming => 'logical');
 $node_subscriber->start;
 
@@ -50,21 +50,15 @@ my $result =
 is($result, qq(2|2|2), 'check initial data was copied to subscriber');
 
 # Interleave a pair of transactions, each exceeding the 64kB limit.
-my $in  = '';
-my $out = '';
-
-my $timer = IPC::Run::timeout($TestLib::timeout_default);
-
-my $h = $node_publisher->background_psql('postgres', \$in, \$out, $timer,
+my $h = $node_publisher->background_psql('postgres',
 	on_error_stop => 0);
 
-$in .= q{
+$h->query_safe(q{
 BEGIN;
 INSERT INTO test_tab SELECT i, md5(i::text) FROM generate_series(3, 5000) s(i);
 UPDATE test_tab SET b = md5(b) WHERE mod(a,2) = 0;
 DELETE FROM test_tab WHERE mod(a,3) = 0;
-};
-$h->pump_nb;
+});
 
 $node_publisher->safe_psql(
 	'postgres', q{
@@ -74,11 +68,9 @@ DELETE FROM test_tab WHERE a > 5000;
 COMMIT;
 });
 
-$in .= q{
-COMMIT;
-\q
-};
-$h->finish;    # errors make the next test fail, so ignore them here
+$h->query_safe('COMMIT');
+# errors make the next test fail, so ignore them here
+$h->quit;
 
 $node_publisher->wait_for_catchup($appname);
 
@@ -128,3 +120,5 @@ is($result, qq(6667|6667|6667),
 
 $node_subscriber->stop;
 $node_publisher->stop;
+
+done_testing();

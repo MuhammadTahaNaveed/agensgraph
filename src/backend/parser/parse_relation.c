@@ -22,7 +22,7 @@
  * parse_relation.c
  *	  parser support routines dealing with relations
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -715,6 +715,17 @@ scanNSItemForColumn(ParseState *pstate, ParseNamespaceItem *nsitem,
 						colname),
 				 parser_errposition(pstate, location)));
 
+	/*
+	 * In a MERGE WHEN condition, no system column is allowed except tableOid
+	 */
+	if (pstate->p_expr_kind == EXPR_KIND_MERGE_WHEN &&
+		attnum < InvalidAttrNumber && attnum != TableOidAttributeNumber)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+				 errmsg("cannot use system column \"%s\" in MERGE WHEN condition",
+						colname),
+				 parser_errposition(pstate, location)));
+
 	/* Found a valid match, so build a Var */
 	if (attnum > InvalidAttrNumber)
 	{
@@ -1154,7 +1165,7 @@ buildRelationAliases(TupleDesc tupdesc, Alias *alias, Alias *eref)
 	for (varattno = 0; varattno < maxattrs; varattno++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, varattno);
-		Value	   *attrname;
+		String	   *attrname;
 
 		if (attr->attisdropped)
 		{
@@ -1167,7 +1178,7 @@ buildRelationAliases(TupleDesc tupdesc, Alias *alias, Alias *eref)
 		else if (aliaslc)
 		{
 			/* Use the next user-supplied alias */
-			attrname = (Value *) lfirst(aliaslc);
+			attrname = lfirst_node(String, aliaslc);
 			aliaslc = lnext(aliaslist, aliaslc);
 			alias->colnames = lappend(alias->colnames, attrname);
 		}
@@ -2009,7 +2020,7 @@ addRangeTableEntryForTableFunc(ParseState *pstate,
 							   bool inFromCl)
 {
 	RangeTblEntry *rte = makeNode(RangeTblEntry);
-	char	   *refname = alias ? alias->aliasname : pstrdup("xmltable");
+	char	   *refname;
 	Alias	   *eref;
 	int			numaliases;
 
@@ -2026,6 +2037,8 @@ addRangeTableEntryForTableFunc(ParseState *pstate,
 	Assert(list_length(tf->coltypes) == list_length(tf->colnames));
 	Assert(list_length(tf->coltypmods) == list_length(tf->colnames));
 	Assert(list_length(tf->colcollations) == list_length(tf->colnames));
+
+	refname = alias ? alias->aliasname : pstrdup("xmltable");
 
 	rte->rtekind = RTE_TABLEFUNC;
 	rte->relid = InvalidOid;
@@ -2048,7 +2061,8 @@ addRangeTableEntryForTableFunc(ParseState *pstate,
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 				 errmsg("%s function has %d columns available but %d columns specified",
-						"XMLTABLE", list_length(tf->colnames), numaliases)));
+						"XMLTABLE",
+						list_length(tf->colnames), numaliases)));
 
 	rte->eref = eref;
 
@@ -2672,12 +2686,17 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 					Assert(varattno == te->resno);
 
 					/*
-					 * In scenarios where columns have been added to a view
-					 * since the outer query was originally parsed, there can
-					 * be more items in the subquery tlist than the outer
-					 * query expects.  We should ignore such extra column(s)
-					 * --- compare the behavior for composite-returning
-					 * functions, in the RTE_FUNCTION case below.
+					 * In a just-parsed subquery RTE, rte->eref->colnames
+					 * should always have exactly as many entries as the
+					 * subquery has non-junk output columns.  However, if the
+					 * subquery RTE was created by expansion of a view,
+					 * perhaps the subquery tlist could now have more entries
+					 * than existed when the outer query was parsed.  Such
+					 * cases should now be prevented because ApplyRetrieveRule
+					 * will extend the colnames list to match.  But out of
+					 * caution, we'll keep the code like this in the back
+					 * branches: just ignore any columns that lack colnames
+					 * entries.
 					 */
 					if (!aliasp_item)
 						break;
@@ -2717,12 +2736,17 @@ expandRTE(RangeTblEntry *rte, int rtindex, int sublevels_up,
 				{
 					RangeTblFunction *rtfunc = (RangeTblFunction *) lfirst(lc);
 					TypeFuncClass functypclass;
-					Oid			funcrettype;
-					TupleDesc	tupdesc;
+					Oid			funcrettype = InvalidOid;
+					TupleDesc	tupdesc = NULL;
 
-					functypclass = get_expr_result_type(rtfunc->funcexpr,
-														&funcrettype,
-														&tupdesc);
+					/* If it has a coldeflist, it returns RECORD */
+					if (rtfunc->funccolnames != NIL)
+						functypclass = TYPEFUNC_RECORD;
+					else
+						functypclass = get_expr_result_type(rtfunc->funcexpr,
+															&funcrettype,
+															&tupdesc);
+
 					if (functypclass == TYPEFUNC_COMPOSITE ||
 						functypclass == TYPEFUNC_COMPOSITE_DOMAIN)
 					{
@@ -3107,7 +3131,7 @@ expandNSItemVars(ParseNamespaceItem *nsitem,
 	colindex = 0;
 	foreach(lc, nsitem->p_names->colnames)
 	{
-		Value	   *colnameval = (Value *) lfirst(lc);
+		String	   *colnameval = lfirst(lc);
 		const char *colname = strVal(colnameval);
 		ParseNamespaceColumn *nscol = nsitem->p_nscolumns + colindex;
 
@@ -3150,11 +3174,12 @@ expandNSItemVars(ParseNamespaceItem *nsitem,
  *	  for the attributes of the nsitem
  *
  * pstate->p_next_resno determines the resnos assigned to the TLEs.
- * The referenced columns are marked as requiring SELECT access.
+ * The referenced columns are marked as requiring SELECT access, if
+ * caller requests that.
  */
 List *
 expandNSItemAttrs(ParseState *pstate, ParseNamespaceItem *nsitem,
-				  int sublevels_up, int location)
+				  int sublevels_up, bool require_col_privs, int location)
 {
 	RangeTblEntry *rte = nsitem->p_rte;
 	List	   *names,
@@ -3188,8 +3213,11 @@ expandNSItemAttrs(ParseState *pstate, ParseNamespaceItem *nsitem,
 							 false);
 		te_list = lappend(te_list, te);
 
-		/* Require read access to each column */
-		markVarForSelectPriv(pstate, varnode);
+		if (require_col_privs)
+		{
+			/* Require read access to each column */
+			markVarForSelectPriv(pstate, varnode);
+		}
 	}
 
 	Assert(name == NULL && var == NULL);	/* lists not the same length? */
@@ -3335,6 +3363,10 @@ get_rte_attribute_is_dropped(RangeTblEntry *rte, AttrNumber attnum)
 						attnum <= atts_done + rtfunc->funccolcount)
 					{
 						TupleDesc	tupdesc;
+
+						/* If it has a coldeflist, it returns RECORD */
+						if (rtfunc->funccolnames != NIL)
+							return false;	/* can't have any dropped columns */
 
 						tupdesc = get_expr_result_tupdesc(rtfunc->funcexpr,
 														  true);

@@ -31,7 +31,7 @@
  * postgresql.conf.  An extension also has an installation script file,
  * containing SQL commands to create the extension's objects.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -506,11 +506,22 @@ parse_extension_control_file(ExtensionControlFile *control,
 
 	if ((file = AllocateFile(filename, "r")) == NULL)
 	{
-		if (version && errno == ENOENT)
+		if (errno == ENOENT)
 		{
-			/* no auxiliary file for this version */
-			pfree(filename);
-			return;
+			/* no complaint for missing auxiliary file */
+			if (version)
+			{
+				pfree(filename);
+				return;
+			}
+
+			/* missing control file indicates extension is not installed */
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("extension \"%s\" is not available", control->name),
+					 errdetail("Could not open extension control file \"%s\": %m.",
+							   filename),
+					 errhint("The extension must first be installed on the system where PostgreSQL is running.")));
 		}
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -765,11 +776,11 @@ execute_sql_string(const char *sql)
 		/* Be sure parser can see any DDL done so far */
 		CommandCounterIncrement();
 
-		stmt_list = pg_analyze_and_rewrite(parsetree,
-										   sql,
-										   NULL,
-										   0,
-										   NULL);
+		stmt_list = pg_analyze_and_rewrite_fixedparams(parsetree,
+													   sql,
+													   NULL,
+													   0,
+													   NULL);
 		stmt_list = pg_plan_queries(stmt_list, sql, CURSOR_OPT_PARALLEL_OK, NULL);
 
 		foreach(lc2, stmt_list)
@@ -915,6 +926,9 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 	 * We use the equivalent of a function SET option to allow the setting to
 	 * persist for exactly the duration of the script execution.  guc.c also
 	 * takes care of undoing the setting on error.
+	 *
+	 * log_min_messages can't be set by ordinary users, so for that one we
+	 * pretend to be superuser.
 	 */
 	save_nestlevel = NewGUCNestLevel();
 
@@ -923,9 +937,10 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 								 PGC_USERSET, PGC_S_SESSION,
 								 GUC_ACTION_SAVE, true, 0, false);
 	if (log_min_messages < WARNING)
-		(void) set_config_option("log_min_messages", "warning",
-								 PGC_SUSET, PGC_S_SESSION,
-								 GUC_ACTION_SAVE, true, 0, false);
+		(void) set_config_option_ext("log_min_messages", "warning",
+									 PGC_SUSET, PGC_S_SESSION,
+									 BOOTSTRAP_SUPERUSERID,
+									 GUC_ACTION_SAVE, true, 0, false);
 
 	/*
 	 * Similarly disable check_function_bodies, to ensure that SQL functions
@@ -977,6 +992,16 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 		char	   *c_sql = read_extension_script_file(control, filename);
 		Datum		t_sql;
 
+		/*
+		 * We filter each substitution through quote_identifier().  When the
+		 * arg contains one of the following characters, no one collection of
+		 * quoting can work inside $$dollar-quoted string literals$$,
+		 * 'single-quoted string literals', and outside of any literal.  To
+		 * avoid a security snare for extension authors, error on substitution
+		 * for arguments containing these.
+		 */
+		const char *quoting_relevant_chars = "\"$'\\";
+
 		/* We use various functions that want to operate on text datums */
 		t_sql = CStringGetTextDatum(c_sql);
 
@@ -1006,6 +1031,11 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 											t_sql,
 											CStringGetTextDatum("@extowner@"),
 											CStringGetTextDatum(qUserName));
+			if (strpbrk(userName, quoting_relevant_chars))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+						 errmsg("invalid character in extension owner: must not contain any of \"%s\"",
+								quoting_relevant_chars)));
 		}
 
 		/*
@@ -1017,6 +1047,7 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 		 */
 		if (!control->relocatable)
 		{
+			Datum		old = t_sql;
 			const char *qSchemaName = quote_identifier(schemaName);
 
 			t_sql = DirectFunctionCall3Coll(replace_text,
@@ -1024,6 +1055,11 @@ execute_extension_script(Oid extensionOid, ExtensionControlFile *control,
 											t_sql,
 											CStringGetTextDatum("@extschema@"),
 											CStringGetTextDatum(qSchemaName));
+			if (t_sql != old && strpbrk(schemaName, quoting_relevant_chars))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+						 errmsg("invalid character in extension \"%s\" schema: must not contain any of \"%s\"",
+								control->name, quoting_relevant_chars)));
 		}
 
 		/*
@@ -1750,30 +1786,21 @@ CreateExtension(ParseState *pstate, CreateExtensionStmt *stmt)
 		if (strcmp(defel->defname, "schema") == 0)
 		{
 			if (d_schema)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("conflicting or redundant options"),
-						 parser_errposition(pstate, defel->location)));
+				errorConflictingDefElem(defel, pstate);
 			d_schema = defel;
 			schemaName = defGetString(d_schema);
 		}
 		else if (strcmp(defel->defname, "new_version") == 0)
 		{
 			if (d_new_version)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("conflicting or redundant options"),
-						 parser_errposition(pstate, defel->location)));
+				errorConflictingDefElem(defel, pstate);
 			d_new_version = defel;
 			versionName = defGetString(d_new_version);
 		}
 		else if (strcmp(defel->defname, "cascade") == 0)
 		{
 			if (d_cascade)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("conflicting or redundant options"),
-						 parser_errposition(pstate, defel->location)));
+				errorConflictingDefElem(defel, pstate);
 			d_cascade = defel;
 			cascade = defGetBoolean(d_cascade);
 		}
@@ -1949,38 +1976,12 @@ Datum
 pg_available_extensions(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
-	MemoryContext per_query_ctx;
-	MemoryContext oldcontext;
 	char	   *location;
 	DIR		   *dir;
 	struct dirent *de;
 
-	/* check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not allowed in this context")));
-
-	/* Build a tuple descriptor for our result type */
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
-
 	/* Build tuplestore to hold the result rows */
-	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = tupdesc;
-
-	MemoryContextSwitchTo(oldcontext);
+	InitMaterializedSRF(fcinfo, 0);
 
 	location = get_extension_control_directory();
 	dir = AllocateDir(location);
@@ -2032,14 +2033,12 @@ pg_available_extensions(PG_FUNCTION_ARGS)
 			else
 				values[2] = CStringGetTextDatum(control->comment);
 
-			tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+								 values, nulls);
 		}
 
 		FreeDir(dir);
 	}
-
-	/* clean up and return the tuplestore */
-	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
 }
@@ -2057,38 +2056,12 @@ Datum
 pg_available_extension_versions(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
-	MemoryContext per_query_ctx;
-	MemoryContext oldcontext;
 	char	   *location;
 	DIR		   *dir;
 	struct dirent *de;
 
-	/* check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not allowed in this context")));
-
-	/* Build a tuple descriptor for our result type */
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
-
 	/* Build tuplestore to hold the result rows */
-	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = tupdesc;
-
-	MemoryContextSwitchTo(oldcontext);
+	InitMaterializedSRF(fcinfo, 0);
 
 	location = get_extension_control_directory();
 	dir = AllocateDir(location);
@@ -2123,14 +2096,12 @@ pg_available_extension_versions(PG_FUNCTION_ARGS)
 			control = read_extension_control_file(extname);
 
 			/* scan extension's script directory for install scripts */
-			get_available_versions_for_extension(control, tupstore, tupdesc);
+			get_available_versions_for_extension(control, rsinfo->setResult,
+												 rsinfo->setDesc);
 		}
 
 		FreeDir(dir);
 	}
-
-	/* clean up and return the tuplestore */
-	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
 }
@@ -2339,10 +2310,6 @@ pg_extension_update_paths(PG_FUNCTION_ARGS)
 {
 	Name		extname = PG_GETARG_NAME(0);
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
-	MemoryContext per_query_ctx;
-	MemoryContext oldcontext;
 	List	   *evi_list;
 	ExtensionControlFile *control;
 	ListCell   *lc1;
@@ -2350,30 +2317,8 @@ pg_extension_update_paths(PG_FUNCTION_ARGS)
 	/* Check extension name validity before any filesystem access */
 	check_valid_extension_name(NameStr(*extname));
 
-	/* check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not allowed in this context")));
-
-	/* Build a tuple descriptor for our result type */
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
-
 	/* Build tuplestore to hold the result rows */
-	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = tupdesc;
-
-	MemoryContextSwitchTo(oldcontext);
+	InitMaterializedSRF(fcinfo, 0);
 
 	/* Read the extension's control file */
 	control = read_extension_control_file(NameStr(*extname));
@@ -2430,12 +2375,10 @@ pg_extension_update_paths(PG_FUNCTION_ARGS)
 				pfree(pathbuf.data);
 			}
 
-			tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+								 values, nulls);
 		}
 	}
-
-	/* clean up and return the tuplestore */
-	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
 }
@@ -2808,7 +2751,7 @@ AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *o
 {
 	Oid			extensionOid;
 	Oid			nspOid;
-	Oid			oldNspOid = InvalidOid;
+	Oid			oldNspOid;
 	AclResult	aclresult;
 	Relation	extRel;
 	ScanKeyData key[2];
@@ -2891,6 +2834,9 @@ AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *o
 
 	objsMoved = new_object_addresses();
 
+	/* store the OID of the namespace to-be-changed */
+	oldNspOid = extForm->extnamespace;
+
 	/*
 	 * Scan pg_depend to find objects that depend directly on the extension,
 	 * and alter each one's schema.
@@ -2935,12 +2881,6 @@ AlterExtensionNamespace(const char *extensionName, const char *newschema, Oid *o
 												 dep.objectId,
 												 nspOid,
 												 objsMoved);
-
-		/*
-		 * Remember previous namespace of first object that has one
-		 */
-		if (oldNspOid == InvalidOid && dep_oldNspOid != InvalidOid)
-			oldNspOid = dep_oldNspOid;
 
 		/*
 		 * If not all the objects had the same old namespace (ignoring any
@@ -3070,10 +3010,7 @@ ExecAlterExtensionStmt(ParseState *pstate, AlterExtensionStmt *stmt)
 		if (strcmp(defel->defname, "new_version") == 0)
 		{
 			if (d_new_version)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("conflicting or redundant options"),
-						 parser_errposition(pstate, defel->location)));
+				errorConflictingDefElem(defel, pstate);
 			d_new_version = defel;
 		}
 		else

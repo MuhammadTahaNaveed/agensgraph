@@ -22,7 +22,7 @@
  * test.c
  *		Test harness code for shared memory message queues.
  *
- * Copyright (c) 2013-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2013-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		src/test/modules/test_shm_mq/test.c
@@ -92,7 +92,7 @@ test_shm_mq(PG_FUNCTION_ARGS)
 	test_shm_mq_setup(queue_size, nworkers, &seg, &outqh, &inqh);
 
 	/* Send the initial message. */
-	res = shm_mq_send(outqh, message_size, message_contents, false);
+	res = shm_mq_send(outqh, message_size, message_contents, false, true);
 	if (res != SHM_MQ_SUCCESS)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -116,7 +116,7 @@ test_shm_mq(PG_FUNCTION_ARGS)
 			break;
 
 		/* Send it back out. */
-		res = shm_mq_send(outqh, len, data, false);
+		res = shm_mq_send(outqh, len, data, false, true);
 		if (res != SHM_MQ_SUCCESS)
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -196,7 +196,8 @@ test_shm_mq_pipelined(PG_FUNCTION_ARGS)
 		 */
 		if (send_count < loop_count)
 		{
-			res = shm_mq_send(outqh, message_size, message_contents, true);
+			res = shm_mq_send(outqh, message_size, message_contents, true,
+							  true);
 			if (res == SHM_MQ_SUCCESS)
 			{
 				++send_count;

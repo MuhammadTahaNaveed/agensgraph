@@ -24,7 +24,7 @@
  * Assorted utility functions to work on files.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/common/file_utils.c
@@ -319,7 +319,7 @@ fsync_fname(const char *fname, bool isdir)
 	 */
 	if (returncode != 0 && !(isdir && (errno == EBADF || errno == EINVAL)))
 	{
-		pg_log_fatal("could not fsync file \"%s\": %m", fname);
+		pg_log_error("could not fsync file \"%s\": %m", fname);
 		(void) close(fd);
 		exit(EXIT_FAILURE);
 	}
@@ -389,7 +389,7 @@ durable_rename(const char *oldfile, const char *newfile)
 	{
 		if (fsync(fd) != 0)
 		{
-			pg_log_fatal("could not fsync file \"%s\": %m", newfile);
+			pg_log_error("could not fsync file \"%s\": %m", newfile);
 			close(fd);
 			exit(EXIT_FAILURE);
 		}
@@ -467,7 +467,7 @@ get_dirent_type(const char *path,
 		{
 			result = PGFILETYPE_ERROR;
 #ifdef FRONTEND
-			pg_log_generic(elevel, "could not stat file \"%s\": %m", path);
+			pg_log_generic(elevel, PG_LOG_PRIMARY, "could not stat file \"%s\": %m", path);
 #else
 			ereport(elevel,
 					(errcode_for_file_access(),

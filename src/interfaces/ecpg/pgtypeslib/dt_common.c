@@ -1759,7 +1759,6 @@ ParseDateTime(char *timestr, char *lowstr,
 		{
 			(*endstr)++;
 			continue;
-
 		}
 		/* otherwise, something is not right... */
 		else
@@ -2345,10 +2344,10 @@ DecodeDateTime(char **field, int *ftype, int nf,
 			return ((fmask & DTK_TIME_M) == DTK_TIME_M) ? 1 : -1;
 
 		/*
-		 * check for valid day of month, now that we know for sure the month
-		 * and year...
+		 * check for valid day of month and month, now that we know for sure
+		 * the month and year...
 		 */
-		if (tm->tm_mday < 1 || tm->tm_mday > day_tab[isleap(tm->tm_year)][tm->tm_mon - 1])
+		if (tm->tm_mon < 1 || tm->tm_mday < 1 || tm->tm_mday > day_tab[isleap(tm->tm_year)][tm->tm_mon - 1])
 			return -1;
 
 		/*

@@ -1933,6 +1933,30 @@ $$ language plpgsql;
 select refcursor_test2(20000, 20000) as "Should be false",
        refcursor_test2(20, 20) as "Should be true";
 
+-- should fail
+create function constant_refcursor() returns refcursor as $$
+declare
+    rc constant refcursor;
+begin
+    open rc for select a from rc_test;
+    return rc;
+end
+$$ language plpgsql;
+
+select constant_refcursor();
+
+-- but it's okay like this
+create or replace function constant_refcursor() returns refcursor as $$
+declare
+    rc constant refcursor := 'my_cursor_name';
+begin
+    open rc for select a from rc_test;
+    return rc;
+end
+$$ language plpgsql;
+
+select constant_refcursor();
+
 --
 -- tests for cursors with named parameter arguments
 --
@@ -2023,11 +2047,9 @@ begin
 end $$ language plpgsql;
 select namedparmcursor_test7();
 
--- check that line comments work correctly within the argument list (there
--- is some special handling of this case in the code: the newline after the
--- comment must be preserved when the argument-evaluating query is
--- constructed, otherwise the comment effectively comments out the next
--- argument, too)
+-- check that line comments work correctly within the argument list
+-- (this used to require a special hack in the code; it no longer does,
+-- but let's keep the test anyway)
 create function namedparmcursor_test8() returns int4 as $$
 declare
   c1 cursor (p1 int, p2 int) for
@@ -3795,22 +3817,42 @@ end;
 $outer$;
 
 -- Check variable scoping -- a var is not available in its own or prior
--- default expressions.
+-- default expressions, but it is available in later ones.
 
-create function scope_test() returns int as $$
+do $$
+declare x int := x + 1;  -- error
+begin
+  raise notice 'x = %', x;
+end;
+$$;
+
+do $$
+declare y int := x + 1;  -- error
+        x int := 42;
+begin
+  raise notice 'x = %, y = %', x, y;
+end;
+$$;
+
+do $$
+declare x int := 42;
+        y int := x + 1;
+begin
+  raise notice 'x = %, y = %', x, y;
+end;
+$$;
+
+do $$
 declare x int := 42;
 begin
   declare y int := x + 1;
           x int := x + 2;
+          z int := x * 10;
   begin
-    return x * 100 + y;
+    raise notice 'x = %, y = %, z = %', x, y, z;
   end;
 end;
-$$ language plpgsql;
-
-select scope_test();
-
-drop function scope_test();
+$$;
 
 -- Check handling of conflicts between plpgsql vars and table columns.
 

@@ -38,7 +38,7 @@
  * routines.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -796,19 +796,19 @@ definitelyFailed:
  * (putting it in conn->inBuffer) in any situation where we can't send
  * all the specified data immediately.
  *
- * Upon write failure, conn->write_failed is set and the error message is
- * saved in conn->write_err_msg, but we clear the output buffer and return
- * zero anyway; this is because callers should soldier on until it's possible
- * to read from the server and check for an error message.  write_err_msg
- * should be reported only when we are unable to obtain a server error first.
- * (Thus, a -1 result is returned only for an internal *read* failure.)
+ * If a socket-level write failure occurs, conn->write_failed is set and the
+ * error message is saved in conn->write_err_msg, but we clear the output
+ * buffer and return zero anyway; this is because callers should soldier on
+ * until we have read what we can from the server and checked for an error
+ * message.  write_err_msg should be reported only when we are unable to
+ * obtain a server error first.  Much of that behavior is implemented at
+ * lower levels, but this function deals with some edge cases.
  */
 static int
 pqSendSome(PGconn *conn, int len)
 {
 	char	   *ptr = conn->outBuffer;
 	int			remaining = conn->outCount;
-	int			oldmsglen = conn->errorMessage.len;
 	int			result = 0;
 
 	/*
@@ -836,7 +836,7 @@ pqSendSome(PGconn *conn, int len)
 	if (conn->sock == PGINVALID_SOCKET)
 	{
 		conn->write_failed = true;
-		/* Insert error message into conn->write_err_msg, if possible */
+		/* Store error message in conn->write_err_msg, if possible */
 		/* (strdup failure is OK, we'll cope later) */
 		conn->write_err_msg = strdup(libpq_gettext("connection not open\n"));
 		/* Discard queued data; no chance it'll ever be sent */
@@ -878,24 +878,6 @@ pqSendSome(PGconn *conn, int len)
 					continue;
 
 				default:
-					/* pqsecure_write set the error message for us */
-					conn->write_failed = true;
-
-					/*
-					 * Transfer error message to conn->write_err_msg, if
-					 * possible (strdup failure is OK, we'll cope later).
-					 *
-					 * We only want to transfer whatever has been appended to
-					 * conn->errorMessage since we entered this routine.
-					 */
-					if (!PQExpBufferBroken(&conn->errorMessage))
-					{
-						conn->write_err_msg = strdup(conn->errorMessage.data +
-													 oldmsglen);
-						conn->errorMessage.len = oldmsglen;
-						conn->errorMessage.data[oldmsglen] = '\0';
-					}
-
 					/* Discard queued data; no chance it'll ever be sent */
 					conn->outCount = 0;
 
@@ -905,7 +887,18 @@ pqSendSome(PGconn *conn, int len)
 						if (pqReadData(conn) < 0)
 							return -1;
 					}
-					return 0;
+
+					/*
+					 * Lower-level code should already have filled
+					 * conn->write_err_msg (and set conn->write_failed) or
+					 * conn->errorMessage.  In the former case, we pretend
+					 * there's no problem; the write_failed condition will be
+					 * dealt with later.  Otherwise, report the error now.
+					 */
+					if (conn->write_failed)
+						return 0;
+					else
+						return -1;
 			}
 		}
 		else
@@ -1259,13 +1252,14 @@ static void
 libpq_binddomain(void)
 {
 	/*
-	 * If multiple threads come through here at about the same time, it's okay
-	 * for more than one of them to call bindtextdomain().  But it's not okay
-	 * for any of them to return to caller before bindtextdomain() is
-	 * complete, so don't set the flag till that's done.  Use "volatile" just
-	 * to be sure the compiler doesn't try to get cute.
+	 * At least on Windows, there are gettext implementations that fail if
+	 * multiple threads call bindtextdomain() concurrently.  Use a mutex and
+	 * flag variable to ensure that we call it just once per process.  It is
+	 * not known that similar bugs exist on non-Windows platforms, but we
+	 * might as well do it the same way everywhere.
 	 */
 	static volatile bool already_bound = false;
+	static pthread_mutex_t binddomain_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 	if (!already_bound)
 	{
@@ -1275,14 +1269,26 @@ libpq_binddomain(void)
 #else
 		int			save_errno = errno;
 #endif
-		const char *ldir;
 
-		/* No relocatable lookup here because the binary could be anywhere */
-		ldir = getenv("PGLOCALEDIR");
-		if (!ldir)
-			ldir = LOCALEDIR;
-		bindtextdomain(PG_TEXTDOMAIN("libpq"), ldir);
-		already_bound = true;
+		(void) pthread_mutex_lock(&binddomain_mutex);
+
+		if (!already_bound)
+		{
+			const char *ldir;
+
+			/*
+			 * No relocatable lookup here because the calling executable could
+			 * be anywhere
+			 */
+			ldir = getenv("PGLOCALEDIR");
+			if (!ldir)
+				ldir = LOCALEDIR;
+			bindtextdomain(PG_TEXTDOMAIN("libpq"), ldir);
+			already_bound = true;
+		}
+
+		(void) pthread_mutex_unlock(&binddomain_mutex);
+
 #ifdef WIN32
 		SetLastError(save_errno);
 #else

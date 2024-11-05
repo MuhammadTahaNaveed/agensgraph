@@ -26,7 +26,7 @@
  * the nature and use of path keys.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -723,7 +723,7 @@ build_partition_pathkeys(PlannerInfo *root, RelOptInfo *partrel,
 	int			i;
 
 	Assert(partscheme != NULL);
-	Assert(partitions_are_ordered(partrel->boundinfo, partrel->nparts));
+	Assert(partitions_are_ordered(partrel->boundinfo, partrel->live_parts));
 	/* For now, we can only cope with baserels */
 	Assert(IS_SIMPLE_REL(partrel));
 

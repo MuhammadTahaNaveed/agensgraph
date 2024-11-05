@@ -15,7 +15,7 @@
  * there's hardly any use case for using these without superuser-rights
  * anyway.
  *
- * Copyright (c) 2007-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2007-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/pageinspect/heapfuncs.c
@@ -320,7 +320,11 @@ tuple_data_split_internal(Oid relid, char *tupdata,
 	raw_attrs = initArrayResult(BYTEAOID, CurrentMemoryContext, false);
 	nattrs = tupdesc->natts;
 
-	if (rel->rd_rel->relam != HEAP_TABLE_AM_OID)
+	/*
+	 * Sequences always use heap AM, but they don't show that in the catalogs.
+	 */
+	if (rel->rd_rel->relkind != RELKIND_SEQUENCE &&
+		rel->rd_rel->relam != HEAP_TABLE_AM_OID)
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("only heap AM is supported")));
 
@@ -455,8 +459,8 @@ tuple_data_split(PG_FUNCTION_ARGS)
 	 */
 	if (t_infomask & HEAP_HASNULL)
 	{
-		int			bits_str_len;
-		int			bits_len;
+		size_t		bits_str_len;
+		size_t		bits_len;
 
 		bits_len = BITMAPLEN(t_infomask2 & HEAP_NATTS_MASK) * BITS_PER_BYTE;
 		if (!t_bits_str)
@@ -468,7 +472,7 @@ tuple_data_split(PG_FUNCTION_ARGS)
 		if (bits_len != bits_str_len)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("unexpected length of t_bits string: %u, expected %u",
+					 errmsg("unexpected length of t_bits string: %zu, expected %zu",
 							bits_str_len, bits_len)));
 
 		/* do the conversion */

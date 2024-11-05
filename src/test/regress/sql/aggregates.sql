@@ -2,8 +2,23 @@
 -- AGGREGATES
 --
 
+-- directory paths are passed to us in environment variables
+\getenv abs_srcdir PG_ABS_SRCDIR
+
 -- avoid bit-exact output here because operations may not be bit-exact.
 SET extra_float_digits = 0;
+
+-- prepare some test data
+CREATE TABLE aggtest (
+	a 			int2,
+	b			float4
+);
+
+\set filename :abs_srcdir '/data/agg.data'
+COPY aggtest FROM :'filename';
+
+ANALYZE aggtest;
+
 
 SELECT avg(four) AS avg_1 FROM onek;
 
@@ -416,9 +431,22 @@ select distinct min(f1), max(f1) from minmaxtest;
 
 drop table minmaxtest cascade;
 
+-- DISTINCT can also trigger wrong answers with hash aggregation (bug #18465)
+begin;
+set local enable_sort = off;
+explain (costs off)
+  select f1, (select distinct min(t1.f1) from int4_tbl t1 where t1.f1 = t0.f1)
+  from int4_tbl t0;
+select f1, (select distinct min(t1.f1) from int4_tbl t1 where t1.f1 = t0.f1)
+from int4_tbl t0;
+rollback;
+
 -- check for correct detection of nested-aggregate errors
 select max(min(unique1)) from tenk1;
 select (select max(min(unique1)) from int8_tbl) from tenk1;
+select avg((select avg(a1.col1 order by (select avg(a2.col2) from tenk1 a3))
+            from tenk1 a1(col1)))
+from tenk1 a2(col2);
 
 --
 -- Test removal of redundant GROUP BY columns

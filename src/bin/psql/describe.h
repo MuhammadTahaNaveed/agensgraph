@@ -20,7 +20,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2022, PostgreSQL Global Development Group
  *
  * src/bin/psql/describe.h
  */
@@ -101,6 +101,10 @@ extern bool listDomains(const char *pattern, bool verbose, bool showSystem);
 /* \dc */
 extern bool listConversions(const char *pattern, bool verbose, bool showSystem);
 
+/* \dconfig */
+extern bool describeConfigurationParameters(const char *pattern, bool verbose,
+											bool showSystem);
+
 /* \dC */
 extern bool listCasts(const char *pattern, bool verbose);
 
@@ -163,6 +167,9 @@ extern bool listOpFamilyOperators(const char *accessMethod_pattern,
 /* \dAp */
 extern bool listOpFamilyFunctions(const char *access_method_pattern,
 								  const char *family_pattern, bool verbose);
+
+/* \dl or \lo_list */
+extern bool listLargeObjects(bool verbose);
 
 /* AgensGraph Commands */
 /* \dG */

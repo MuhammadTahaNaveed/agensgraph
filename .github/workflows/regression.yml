@@ -23,7 +23,7 @@ jobs:
       - name: Regression
         id: regress
         continue-on-error: true
-        run: make check -j$(nproc) -C src/bin LC_ALL="C"
+        run: make check-world -j$(nproc) LC_ALL="C"
 
       - name: Check on failures
         if: steps.regress.outcome != 'success'

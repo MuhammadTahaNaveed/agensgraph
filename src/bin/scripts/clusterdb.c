@@ -21,7 +21,7 @@
  *
  * clusterdb
  *
- * Portions Copyright (c) 2002-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2002-2022, PostgreSQL Global Development Group
  *
  * src/bin/scripts/clusterdb.c
  *
@@ -128,7 +128,8 @@ main(int argc, char *argv[])
 				maintenance_db = pg_strdup(optarg);
 				break;
 			default:
-				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
+				/* getopt_long already emitted a complaint */
+				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 				exit(1);
 		}
 	}
@@ -147,7 +148,7 @@ main(int argc, char *argv[])
 	{
 		pg_log_error("too many command-line arguments (first is \"%s\")",
 					 argv[optind]);
-		fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
+		pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 		exit(1);
 	}
 
@@ -163,16 +164,10 @@ main(int argc, char *argv[])
 	if (alldb)
 	{
 		if (dbname)
-		{
-			pg_log_error("cannot cluster all databases and a specific one at the same time");
-			exit(1);
-		}
+			pg_fatal("cannot cluster all databases and a specific one at the same time");
 
 		if (tables.head != NULL)
-		{
-			pg_log_error("cannot cluster specific table(s) in all databases");
-			exit(1);
-		}
+			pg_fatal("cannot cluster specific table(s) in all databases");
 
 		cparams.dbname = maintenance_db;
 
@@ -258,7 +253,9 @@ cluster_all_databases(ConnParams *cparams, const char *progname,
 	int			i;
 
 	conn = connectMaintenanceDatabase(cparams, progname, echo);
-	result = executeQuery(conn, "SELECT datname FROM pg_database WHERE datallowconn ORDER BY 1;", echo);
+	result = executeQuery(conn,
+						  "SELECT datname FROM pg_database WHERE datallowconn AND datconnlimit <> -2 ORDER BY 1;",
+						  echo);
 	PQfinish(conn);
 
 	for (i = 0; i < PQntuples(result); i++)

@@ -41,11 +41,15 @@ endif
 
 XMLINCLUDE = --path .
 
-ifndef XMLLINT
+ifdef XMLLINT
+XMLLINT := $(XMLLINT) --nonet
+else
 XMLLINT = $(missing) xmllint
 endif
 
-ifndef XSLTPROC
+ifdef XSLTPROC
+XSLTPROC := $(XSLTPROC) --nonet
+else
 XSLTPROC = $(missing) xsltproc
 endif
 
@@ -201,7 +205,7 @@ MAKEINFO = makeinfo
 	$(DB2X_XSLTPROC) -s texi -g output-file=$(basename $@) $< -o $@
 
 %.texi: %.texixml
-	$(DB2X_TEXIXML) --encoding=iso-8859-1//TRANSLIT $< --to-stdout > $@
+	$(DB2X_TEXIXML) --encoding=utf-8 $< --to-stdout > $@
 
 %.info: %.texi
 	$(MAKEINFO) --enable-encoding --no-split --no-validate $< -o $@

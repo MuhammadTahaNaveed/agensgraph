@@ -1,11 +1,11 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
 
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 
 use Test::More;
 
@@ -177,7 +177,7 @@ umask(0077);
 # Set up the node.  Once we create and corrupt the table,
 # autovacuum workers visiting the table could crash the backend.
 # Disable autovacuum so that won't happen.
-my $node = get_new_node('test');
+my $node = PostgreSQL::Test::Cluster->new('test');
 $node->init;
 $node->append_conf('postgresql.conf', 'autovacuum=off');
 
@@ -217,7 +217,7 @@ my $rel = $node->safe_psql('postgres',
 my $relpath = "$pgdata/$rel";
 
 # Insert data and freeze public.test
-use constant ROWCOUNT => 16;
+use constant ROWCOUNT => 17;
 $node->safe_psql(
 	'postgres', qq(
 	INSERT INTO public.test (a, b, c)
@@ -296,7 +296,6 @@ close($file)
 $node->start;
 
 # Ok, Xids and page layout look ok.  We can run corruption tests.
-plan tests => 19;
 
 # Check that pg_amcheck runs against the uncorrupted table without error.
 $node->command_ok(
@@ -379,23 +378,24 @@ for (my $tupidx = 0; $tupidx < ROWCOUNT; $tupidx++)
 	elsif ($offnum == 3)
 	{
 		# Corruptly set xmin < datfrozenxid, further back, noting circularity
-		# of xid comparison.  For a new cluster with epoch = 0, the corrupt
-		# xmin will be interpreted as in the future
-		$tup->{t_xmin} = 4026531839;
+		# of xid comparison.
+		my $xmin = 4026531839;
+		$tup->{t_xmin} = $xmin;
 		$tup->{t_infomask} &= ~HEAP_XMIN_COMMITTED;
 		$tup->{t_infomask} &= ~HEAP_XMIN_INVALID;
 
 		push @expected,
-		  qr/${$header}xmin 4026531839 equals or exceeds next valid transaction ID 0:\d+/;
+		  qr/${$header}xmin ${xmin} precedes oldest valid transaction ID 0:\d+/;
 	}
 	elsif ($offnum == 4)
 	{
 		# Corruptly set xmax < relminmxid;
-		$tup->{t_xmax} = 4026531839;
+		my $xmax = 4026531839;
+		$tup->{t_xmax} = $xmax;
 		$tup->{t_infomask} &= ~HEAP_XMAX_INVALID;
 
 		push @expected,
-		  qr/${$header}xmax 4026531839 equals or exceeds next valid transaction ID 0:\d+/;
+		  qr/${$header}xmax ${xmax} precedes oldest valid transaction ID 0:\d+/;
 	}
 	elsif ($offnum == 5)
 	{
@@ -503,7 +503,7 @@ for (my $tupidx = 0; $tupidx < ROWCOUNT; $tupidx++)
 		push @expected,
 		  qr/${header}multitransaction ID 4 equals or exceeds next valid multitransaction ID 1/;
 	}
-	elsif ($offnum == 15)    # Last offnum must equal ROWCOUNT
+	elsif ($offnum == 15)
 	{
 		# Set both HEAP_XMAX_COMMITTED and HEAP_XMAX_IS_MULTI
 		$tup->{t_infomask} |= HEAP_XMAX_COMMITTED;
@@ -512,6 +512,17 @@ for (my $tupidx = 0; $tupidx < ROWCOUNT; $tupidx++)
 
 		push @expected,
 		  qr/${header}multitransaction ID 4000000000 precedes relation minimum multitransaction ID threshold 1/;
+	}
+	elsif ($offnum == 16)    # Last offnum must equal ROWCOUNT
+	{
+		# Corruptly set xmin > next_xid to be in the future.
+		my $xmin = 123456;
+		$tup->{t_xmin} = $xmin;
+		$tup->{t_infomask} &= ~HEAP_XMIN_COMMITTED;
+		$tup->{t_infomask} &= ~HEAP_XMIN_INVALID;
+
+		push @expected,
+          qr/${$header}xmin ${xmin} equals or exceeds next valid transaction ID 0:\d+/;
 	}
 	write_tuple($file, $offset, $tup);
 }
@@ -527,3 +538,5 @@ $node->command_checks_all(
 
 $node->teardown_node;
 $node->clean_node;
+
+done_testing();

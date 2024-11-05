@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 package Solution;
 
@@ -219,10 +219,6 @@ sub GenerateFiles
 	# Every symbol in pg_config.h.in must be accounted for here.  Set
 	# to undef if the symbol should not be defined.
 	my %define = (
-		ACCEPT_TYPE_ARG1           => 'unsigned int',
-		ACCEPT_TYPE_ARG2           => 'struct sockaddr *',
-		ACCEPT_TYPE_ARG3           => 'int',
-		ACCEPT_TYPE_RETURN         => 'unsigned int PASCAL',
 		ALIGNOF_DOUBLE             => 8,
 		ALIGNOF_INT                => 4,
 		ALIGNOF_LONG               => 4,
@@ -234,6 +230,7 @@ sub GenerateFiles
 		CONFIGURE_ARGS             => '"' . $self->GetFakeConfigure() . '"',
 		DEF_PGPORT                 => $port,
 		DEF_PGPORT_STR             => qq{"$port"},
+		DLSUFFIX                   => '".dll"',
 		ENABLE_GSS                 => $self->{options}->{gss} ? 1 : undef,
 		ENABLE_NLS                 => $self->{options}->{nls} ? 1 : undef,
 		ENABLE_THREAD_SAFETY       => 1,
@@ -243,7 +240,6 @@ sub GenerateFiles
 		HAVE_ATOMICS               => 1,
 		HAVE_ATOMIC_H              => undef,
 		HAVE_BACKTRACE_SYMBOLS     => undef,
-		HAVE_BIO_GET_DATA          => undef,
 		HAVE_BIO_METH_NEW          => undef,
 		HAVE_CLOCK_GETTIME         => undef,
 		HAVE_COMPUTED_GOTO         => undef,
@@ -263,6 +259,7 @@ sub GenerateFiles
 		HAVE_DECL_PWRITEV                           => 0,
 		HAVE_DECL_RTLD_GLOBAL                       => 0,
 		HAVE_DECL_RTLD_NOW                          => 0,
+		HAVE_DECL_SIGWAIT                           => 0,
 		HAVE_DECL_STRLCAT                           => 0,
 		HAVE_DECL_STRLCPY                           => 0,
 		HAVE_DECL_STRNLEN                           => 1,
@@ -304,6 +301,7 @@ sub GenerateFiles
 		HAVE_HISTORY_TRUNCATE_FILE                  => undef,
 		HAVE_IFADDRS_H                              => undef,
 		HAVE_INET_ATON                              => undef,
+		HAVE_INET_PTON                              => 1,
 		HAVE_INT_TIMEZONE                           => 1,
 		HAVE_INT64                                  => undef,
 		HAVE_INT8                                   => undef,
@@ -328,11 +326,11 @@ sub GenerateFiles
 		HAVE_LIBXML2                                => undef,
 		HAVE_LIBXSLT                                => undef,
 		HAVE_LIBZ                   => $self->{options}->{zlib} ? 1 : undef,
+		HAVE_LIBZSTD                => undef,
 		HAVE_LINK                   => undef,
 		HAVE_LOCALE_T               => 1,
 		HAVE_LONG_INT_64            => undef,
 		HAVE_LONG_LONG_INT_64       => 1,
-		HAVE_LZ4_H                  => undef,
 		HAVE_MBARRIER_H             => undef,
 		HAVE_MBSTOWCS_L             => 1,
 		HAVE_MEMORY_H               => 1,
@@ -346,6 +344,7 @@ sub GenerateFiles
 		HAVE_PAM_PAM_APPL_H         => undef,
 		HAVE_POLL                   => undef,
 		HAVE_POLL_H                 => undef,
+		HAVE_POSIX_DECL_SIGWAIT     => undef,
 		HAVE_POSIX_FADVISE          => undef,
 		HAVE_POSIX_FALLOCATE        => undef,
 		HAVE_PPC_LWARX_MUTEX_HINT   => undef,
@@ -358,27 +357,27 @@ sub GenerateFiles
 		HAVE_PTHREAD_IS_THREADED_NP => undef,
 		HAVE_PTHREAD_PRIO_INHERIT   => undef,
 		HAVE_PWRITE                 => undef,
-		HAVE_RANDOM                 => undef,
 		HAVE_READLINE_H             => undef,
 		HAVE_READLINE_HISTORY_H     => undef,
 		HAVE_READLINE_READLINE_H    => undef,
 		HAVE_READLINK               => undef,
 		HAVE_READV                  => undef,
-		HAVE_RL_COMPLETION_APPEND_CHARACTER      => undef,
-		HAVE_RL_COMPLETION_MATCHES               => undef,
+		HAVE_RL_COMPLETION_MATCHES  => undef,
 		HAVE_RL_COMPLETION_SUPPRESS_QUOTE        => undef,
 		HAVE_RL_FILENAME_COMPLETION_FUNCTION     => undef,
 		HAVE_RL_FILENAME_QUOTE_CHARACTERS        => undef,
 		HAVE_RL_FILENAME_QUOTING_FUNCTION        => undef,
 		HAVE_RL_RESET_SCREEN_SIZE                => undef,
+		HAVE_RL_VARIABLE_BIND                    => undef,
 		HAVE_SECURITY_PAM_APPL_H                 => undef,
 		HAVE_SETENV                              => undef,
 		HAVE_SETPROCTITLE                        => undef,
 		HAVE_SETPROCTITLE_FAST                   => undef,
 		HAVE_SETSID                              => undef,
 		HAVE_SHM_OPEN                            => undef,
+		HAVE_SOCKLEN_T                           => 1,
 		HAVE_SPINLOCKS                           => 1,
-		HAVE_SRANDOM                             => undef,
+		HAVE_SSL_CTX_SET_NUM_TICKETS             => undef,
 		HAVE_STDBOOL_H                           => 1,
 		HAVE_STDINT_H                            => 1,
 		HAVE_STDLIB_H                            => 1,
@@ -413,6 +412,7 @@ sub GenerateFiles
 		HAVE_SYS_EPOLL_H                         => undef,
 		HAVE_SYS_EVENT_H                         => undef,
 		HAVE_SYS_IPC_H                           => undef,
+		HAVE_SYS_PERSONALITY_H                   => undef,
 		HAVE_SYS_PRCTL_H                         => undef,
 		HAVE_SYS_PROCCTL_H                       => undef,
 		HAVE_SYS_PSTAT_H                         => undef,
@@ -447,6 +447,7 @@ sub GenerateFiles
 		HAVE_WCTYPE_H                            => 1,
 		HAVE_WRITEV                              => undef,
 		HAVE_X509_GET_SIGNATURE_NID              => 1,
+		HAVE_X509_GET_SIGNATURE_INFO             => undef,
 		HAVE_X86_64_POPCNTQ                      => undef,
 		HAVE__BOOL                               => undef,
 		HAVE__BUILTIN_BSWAP16                    => undef,
@@ -523,6 +524,7 @@ sub GenerateFiles
 		USE_UNNAMED_POSIX_SEMAPHORES        => undef,
 		USE_WIN32_SEMAPHORES                => 1,
 		USE_WIN32_SHARED_MEMORY             => 1,
+		USE_ZSTD                            => undef,
 		WCSTOMBS_L_IN_XLOCALE               => undef,
 		WORDS_BIGENDIAN                     => undef,
 		XLOG_BLCKSZ       => 1024 * $self->{options}->{wal_blocksize},
@@ -558,8 +560,12 @@ sub GenerateFiles
 	if ($self->{options}->{lz4})
 	{
 		$define{HAVE_LIBLZ4} = 1;
-		$define{HAVE_LZ4_H}  = 1;
 		$define{USE_LZ4}     = 1;
+	}
+	if ($self->{options}->{zstd})
+	{
+		$define{HAVE_LIBZSTD} = 1;
+		$define{USE_ZSTD}     = 1;
 	}
 	if ($self->{options}->{openssl})
 	{
@@ -567,12 +573,19 @@ sub GenerateFiles
 
 		my ($digit1, $digit2, $digit3) = $self->GetOpenSSLVersion();
 
-		# More symbols are needed with OpenSSL 1.1.0 and above.
+		# Symbols needed with OpenSSL 1.1.1 and above.
+		if (   ($digit1 >= '3' && $digit2 >= '0' && $digit3 >= '0')
+			|| ($digit1 >= '1' && $digit2 >= '1' && $digit3 >= '1'))
+		{
+			$define{HAVE_X509_GET_SIGNATURE_INFO} = 1;
+			$define{HAVE_SSL_CTX_SET_NUM_TICKETS} = 1;
+		}
+
+		# Symbols needed with OpenSSL 1.1.0 and above.
 		if (   ($digit1 >= '3' && $digit2 >= '0' && $digit3 >= '0')
 			|| ($digit1 >= '1' && $digit2 >= '1' && $digit3 >= '0'))
 		{
 			$define{HAVE_ASN1_STRING_GET0_DATA} = 1;
-			$define{HAVE_BIO_GET_DATA}          = 1;
 			$define{HAVE_BIO_METH_NEW}          = 1;
 			$define{HAVE_HMAC_CTX_FREE}         = 1;
 			$define{HAVE_HMAC_CTX_NEW}          = 1;
@@ -1103,6 +1116,11 @@ sub AddProject
 		$proj->AddIncludeDir($self->{options}->{lz4} . '\include');
 		$proj->AddLibrary($self->{options}->{lz4} . '\lib\liblz4.lib');
 	}
+	if ($self->{options}->{zstd})
+	{
+		$proj->AddIncludeDir($self->{options}->{zstd} . '\include');
+		$proj->AddLibrary($self->{options}->{zstd} . '\lib\libzstd.lib');
+	}
 	if ($self->{options}->{uuid})
 	{
 		$proj->AddIncludeDir($self->{options}->{uuid} . '\include');
@@ -1215,6 +1233,7 @@ sub GetFakeConfigure
 	$cfg .= ' --with-libxml'        if ($self->{options}->{xml});
 	$cfg .= ' --with-libxslt'       if ($self->{options}->{xslt});
 	$cfg .= ' --with-lz4'           if ($self->{options}->{lz4});
+	$cfg .= ' --with-zstd'          if ($self->{options}->{zstd});
 	$cfg .= ' --with-gssapi'        if ($self->{options}->{gss});
 	$cfg .= ' --with-icu'           if ($self->{options}->{icu});
 	$cfg .= ' --with-tcl'           if ($self->{options}->{tcl});

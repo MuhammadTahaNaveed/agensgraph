@@ -22,7 +22,7 @@
  * test_rbtree.c
  *		Test correctness of red-black tree operations.
  *
- * Copyright (c) 2009-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2009-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		src/test/modules/test_rbtree/test_rbtree.c
@@ -32,6 +32,7 @@
 
 #include "postgres.h"
 
+#include "common/pg_prng.h"
 #include "fmgr.h"
 #include "lib/rbtree.h"
 #include "utils/memutils.h"
@@ -127,7 +128,7 @@ GetPermutation(int size)
 	 */
 	for (i = 1; i < size; i++)
 	{
-		int			j = random() % (i + 1);
+		int			j = pg_prng_uint64_range(&pg_global_prng_state, 0, i);
 
 		if (j < i)				/* avoid fetching undefined data if j=i */
 			permutation[i] = permutation[j];
@@ -339,7 +340,7 @@ testdelete(int size, int delsize)
 
 	for (i = 0; i < delsize; i++)
 	{
-		int			k = random() % size;
+		int			k = pg_prng_uint64_range(&pg_global_prng_state, 0, size - 1);
 
 		while (chosen[k])
 			k = (k + 1) % size;
